@@ -4,6 +4,7 @@ import MainLayout from './layouts/MainLayout';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import DevicesPage from './pages/DevicesPage';
+import DeviceDetailPage from './pages/DeviceDetailPage';
 import InterfacesPage from './pages/InterfacesPage';
 import AlertsPage from './pages/AlertsPage';
 import TopologyPage from './pages/TopologyPage';
@@ -36,6 +37,7 @@ function App() {
         >
           <Route index element={<DashboardPage />} />
           <Route path="devices" element={<DevicesPage />} />
+          <Route path="devices/:id" element={<DeviceDetailPage />} />
           <Route path="interfaces" element={<InterfacesPage />} />
           <Route path="alerts" element={<AlertsPage />} />
           <Route path="topology" element={<TopologyPage />} />

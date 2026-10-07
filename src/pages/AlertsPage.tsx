@@ -1,11 +1,12 @@
 import { useState, useMemo } from 'react';
 import { useDeviceStore } from '../stores/devices';
-import { AlertTriangle, CheckCircle, XCircle, Clock, Filter, Bell, BellOff } from 'lucide-react';
+import { AlertTriangle, CheckCircle, XCircle, Clock, Filter, Bell, BellOff, Eye } from 'lucide-react';
 
 export default function AlertsPage() {
-  const { alerts, acknowledgeAlert } = useDeviceStore();
+  const { alerts, acknowledgeAlert, resolveAlert } = useDeviceStore();
   const [severityFilter, setSeverityFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [selectedAlert, setSelectedAlert] = useState<string | null>(null);
 
   const filteredAlerts = useMemo(() => {
     return alerts.filter((a) => {
@@ -41,6 +42,16 @@ export default function AlertsPage() {
     }
   };
 
+  const getSeverityIcon = (severity: string) => {
+    switch (severity) {
+      case 'critical': return <XCircle className="w-4 h-4 text-noc-danger" />;
+      case 'high': return <AlertTriangle className="w-4 h-4 text-orange-500" />;
+      case 'warning': return <AlertTriangle className="w-4 h-4 text-noc-warning" />;
+      case 'info': return <Bell className="w-4 h-4 text-noc-info" />;
+      default: return <Bell className="w-4 h-4 text-noc-text-muted" />;
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -52,49 +63,49 @@ export default function AlertsPage() {
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="bg-noc-surface border border-noc-danger/20 rounded-lg p-3 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-noc-danger/10 flex items-center justify-center">
-            <XCircle className="w-5 h-5 text-noc-danger" />
+        <div className="bg-noc-surface border border-noc-border rounded-lg p-3 flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-noc-danger/10 flex items-center justify-center">
+            <XCircle className="w-4 h-4 text-noc-danger" />
           </div>
           <div>
-            <p className="text-xl font-bold text-noc-danger">{counts.critical}</p>
-            <p className="text-xs text-noc-text-muted">Critical</p>
+            <p className="text-lg font-bold text-noc-danger">{counts.critical}</p>
+            <p className="text-[10px] text-noc-text-muted uppercase">Critical</p>
           </div>
         </div>
-        <div className="bg-noc-surface border border-orange-500/20 rounded-lg p-3 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-orange-500/10 flex items-center justify-center">
-            <AlertTriangle className="w-5 h-5 text-orange-500" />
+        <div className="bg-noc-surface border border-noc-border rounded-lg p-3 flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-orange-500/10 flex items-center justify-center">
+            <AlertTriangle className="w-4 h-4 text-orange-500" />
           </div>
           <div>
-            <p className="text-xl font-bold text-orange-500">{counts.high}</p>
-            <p className="text-xs text-noc-text-muted">High</p>
+            <p className="text-lg font-bold text-orange-500">{counts.high}</p>
+            <p className="text-[10px] text-noc-text-muted uppercase">High</p>
           </div>
         </div>
-        <div className="bg-noc-surface border border-noc-warning/20 rounded-lg p-3 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-noc-warning/10 flex items-center justify-center">
-            <AlertTriangle className="w-5 h-5 text-noc-warning" />
+        <div className="bg-noc-surface border border-noc-border rounded-lg p-3 flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-noc-warning/10 flex items-center justify-center">
+            <AlertTriangle className="w-4 h-4 text-noc-warning" />
           </div>
           <div>
-            <p className="text-xl font-bold text-noc-warning">{counts.warning}</p>
-            <p className="text-xs text-noc-text-muted">Warning</p>
+            <p className="text-lg font-bold text-noc-warning">{counts.warning}</p>
+            <p className="text-[10px] text-noc-text-muted uppercase">Warning</p>
           </div>
         </div>
-        <div className="bg-noc-surface border border-noc-info/20 rounded-lg p-3 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-noc-info/10 flex items-center justify-center">
-            <Bell className="w-5 h-5 text-noc-info" />
+        <div className="bg-noc-surface border border-noc-border rounded-lg p-3 flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-noc-info/10 flex items-center justify-center">
+            <Bell className="w-4 h-4 text-noc-info" />
           </div>
           <div>
-            <p className="text-xl font-bold text-noc-info">{counts.info}</p>
-            <p className="text-xs text-noc-text-muted">Info</p>
+            <p className="text-lg font-bold text-noc-info">{counts.info}</p>
+            <p className="text-[10px] text-noc-text-muted uppercase">Info</p>
           </div>
         </div>
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3 bg-noc-surface border border-noc-border rounded-lg p-3">
+      <div className="flex items-center gap-3 bg-noc-surface border border-noc-border rounded-lg p-3">
         <Filter className="w-4 h-4 text-noc-text-muted" />
         <select value={severityFilter} onChange={(e) => setSeverityFilter(e.target.value)} className="px-3 py-2 bg-noc-bg border border-noc-border rounded-lg text-sm text-noc-text focus:outline-none focus:border-noc-primary">
-          <option value="all">All Severities</option>
+          <option value="all">All Severity</option>
           <option value="critical">Critical</option>
           <option value="high">High</option>
           <option value="warning">Warning</option>
@@ -106,44 +117,57 @@ export default function AlertsPage() {
           <option value="acknowledged">Acknowledged</option>
           <option value="resolved">Resolved</option>
         </select>
+        <span className="ml-auto text-xs text-noc-text-muted">{filteredAlerts.length} alerts</span>
       </div>
 
       {/* Alert list */}
       <div className="space-y-2">
         {filteredAlerts.map((alert) => (
-          <div key={alert.id} className="bg-noc-surface border border-noc-border rounded-lg p-4 hover:bg-noc-surface-2 transition-colors">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex items-start gap-3 flex-1">
-                <div className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${getSeverityBadge(alert.severity)}`}>
-                  {alert.severity}
-                </div>
-                <div className="flex-1 min-w-0">
+          <div key={alert.id} className={`bg-noc-surface border rounded-lg p-4 transition-colors ${selectedAlert === alert.id ? 'border-noc-primary/50' : 'border-noc-border hover:border-noc-primary/20'}`}>
+            <div className="flex items-start gap-3">
+              <div className={`p-1.5 rounded-lg ${getSeverityBadge(alert.severity)}`}>
+                {getSeverityIcon(alert.severity)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
                   <h4 className="text-sm font-medium text-noc-text">{alert.title}</h4>
-                  <p className="text-xs text-noc-text-muted mt-0.5">{alert.description}</p>
-                  <div className="flex items-center gap-3 mt-2">
-                    <span className="text-xs text-noc-text-muted">Device: <span className="text-noc-text">{alert.deviceName}</span></span>
-                    <span className="text-xs text-noc-text-muted">Source: {alert.source}</span>
-                    <span className="text-xs text-noc-text-muted">{new Date(alert.createdAt).toLocaleString()}</span>
-                  </div>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium uppercase ${getSeverityBadge(alert.severity)}`}>
+                    {alert.severity}
+                  </span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium uppercase ${getStatusBadge(alert.status)}`}>
+                    {alert.status}
+                  </span>
+                </div>
+                <p className="text-xs text-noc-text-muted mb-2">{alert.description}</p>
+                <div className="flex items-center gap-3 text-[10px] text-noc-text-muted">
+                  <span>Device: {alert.deviceName}</span>
+                  <span>•</span>
+                  <span>Source: {alert.source}</span>
+                  <span>•</span>
+                  <span>{new Date(alert.createdAt).toLocaleString()}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-2 flex-shrink-0">
-                <span className={`text-xs font-medium px-2 py-0.5 rounded ${getStatusBadge(alert.status)}`}>
-                  {alert.status}
-                </span>
+              <div className="flex items-center gap-1 flex-shrink-0">
                 {alert.status === 'open' && (
-                  <button onClick={() => acknowledgeAlert(alert.id)} className="p-1.5 rounded hover:bg-noc-surface text-noc-text-muted hover:text-noc-primary transition-colors" title="Acknowledge">
-                    <BellOff className="w-4 h-4" />
+                  <button onClick={() => acknowledgeAlert(alert.id)} className="px-2 py-1 text-[10px] font-medium text-noc-warning bg-noc-warning/10 rounded hover:bg-noc-warning/20 transition-colors">
+                    Acknowledge
+                  </button>
+                )}
+                {(alert.status === 'open' || alert.status === 'acknowledged') && (
+                  <button onClick={() => resolveAlert(alert.id)} className="px-2 py-1 text-[10px] font-medium text-noc-success bg-noc-success/10 rounded hover:bg-noc-success/20 transition-colors">
+                    Resolve
                   </button>
                 )}
               </div>
             </div>
           </div>
         ))}
+
         {filteredAlerts.length === 0 && (
           <div className="bg-noc-surface border border-noc-border rounded-lg p-8 text-center">
-            <CheckCircle className="w-8 h-8 text-noc-success mx-auto mb-2" />
-            <p className="text-sm text-noc-text-muted">No alerts matching your filters.</p>
+            <CheckCircle className="w-10 h-10 text-noc-success mx-auto mb-3" />
+            <p className="text-sm text-noc-text">No alerts matching your filters</p>
+            <p className="text-xs text-noc-text-muted mt-1">All systems are operating normally</p>
           </div>
         )}
       </div>

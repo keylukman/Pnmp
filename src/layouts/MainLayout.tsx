@@ -1,18 +1,23 @@
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/auth';
+import { useDeviceStore } from '../stores/devices';
 import {
   LayoutDashboard, Server, Network, AlertTriangle, Map, Globe,
   BarChart3, Users, Settings, LogOut, ChevronDown, ChevronRight,
-  Menu, X, Shield, Radio, FileText
+  Menu, X, Shield, Radio, FileText, Bell, User
 } from 'lucide-react';
 
 export default function MainLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [expandedSections, setExpandedSections] = useState<string[]>(['monitoring', 'network', 'administration']);
+  const [showUserMenu, setShowUserMenu] = useState(false);
   const { user, logout } = useAuthStore();
+  const { alerts } = useDeviceStore();
   const navigate = useNavigate();
+
+  const openAlertCount = alerts.filter(a => a.status === 'open').length;
 
   const toggleSection = (section: string) => {
     setExpandedSections((prev) =>
@@ -45,7 +50,7 @@ export default function MainLayout() {
       <aside className={`${sidebarOpen ? 'w-60' : 'w-16'} ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 fixed lg:relative z-50 h-full bg-noc-sidebar border-r border-noc-border transition-all duration-200 flex flex-col`}>
         {/* Logo */}
         <div className="flex items-center gap-3 px-4 py-4 border-b border-noc-border">
-          <div className="w-8 h-8 rounded-lg bg-noc-primary flex items-center justify-center flex-shrink-0">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-noc-primary to-blue-600 flex items-center justify-center flex-shrink-0">
             <Network className="w-5 h-5 text-white" />
           </div>
           {sidebarOpen && (
@@ -87,9 +92,20 @@ export default function MainLayout() {
                     <Radio className="w-4 h-4 flex-shrink-0" />
                     <span>Interfaces</span>
                   </NavLink>
-                  <NavLink to="/alerts" className={navItemClass}>
+                  <NavLink to="/alerts" className={({ isActive }) =>
+                    `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-all duration-150 ${
+                      isActive
+                        ? 'bg-noc-primary/10 text-noc-primary border-l-2 border-noc-primary'
+                        : 'text-noc-text-muted hover:text-noc-text hover:bg-noc-surface'
+                    }`
+                  }>
                     <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                     <span>Alerts</span>
+                    {openAlertCount > 0 && (
+                      <span className="ml-auto bg-noc-danger/20 text-noc-danger text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+                        {openAlertCount}
+                      </span>
+                    )}
                   </NavLink>
                 </div>
               )}
@@ -111,7 +127,7 @@ export default function MainLayout() {
                   </NavLink>
                   <NavLink to="/wan" className={navItemClass}>
                     <Globe className="w-4 h-4 flex-shrink-0" />
-                    <span>WAN Monitoring</span>
+                    <span>WAN</span>
                   </NavLink>
                   <NavLink to="/sites" className={navItemClass}>
                     <Shield className="w-4 h-4 flex-shrink-0" />
@@ -126,7 +142,7 @@ export default function MainLayout() {
           {sidebarOpen && (
             <div className="pt-3">
               <NavLink to="/reports" className={navItemClass}>
-                <FileText className="w-4 h-4 flex-shrink-0" />
+                <BarChart3 className="w-4 h-4 flex-shrink-0" />
                 <span>Reports</span>
               </NavLink>
             </div>
@@ -155,54 +171,83 @@ export default function MainLayout() {
           )}
         </nav>
 
-        {/* User section */}
-        <div className="border-t border-noc-border p-3">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-noc-surface-2 flex items-center justify-center flex-shrink-0">
-              <span className="text-xs font-bold text-noc-primary">
-                {user?.fullName?.charAt(0) || 'U'}
-              </span>
+        {/* Sidebar footer */}
+        {sidebarOpen && (
+          <div className="p-3 border-t border-noc-border">
+            <div className="flex items-center gap-2 px-2 py-2 rounded-lg bg-noc-surface/50">
+              <div className="w-2 h-2 rounded-full bg-noc-success animate-pulse" />
+              <span className="text-[10px] text-noc-text-muted">System Healthy</span>
+              <span className="ml-auto text-[10px] text-noc-text-muted">v1.0.0</span>
             </div>
-            {sidebarOpen && (
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-noc-text truncate">{user?.fullName}</p>
-                <p className="text-[10px] text-noc-text-muted">{user?.role?.replace('_', ' ')}</p>
-              </div>
-            )}
-            {sidebarOpen && (
-              <button onClick={handleLogout} className="text-noc-text-muted hover:text-noc-danger transition-colors">
-                <LogOut className="w-4 h-4" />
-              </button>
-            )}
           </div>
-        </div>
+        )}
       </aside>
 
-      {/* Main content */}
+      {/* Main content area */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
-        <header className="h-12 bg-noc-header border-b border-noc-border flex items-center justify-between px-4 flex-shrink-0">
-          <button onClick={() => setMobileMenuOpen(true)} className="lg:hidden text-noc-text-muted hover:text-noc-text">
-            <Menu className="w-5 h-5" />
-          </button>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-noc-success status-up"></div>
-            <span className="text-xs text-noc-text-muted">System Online</span>
+        <header className="h-14 bg-noc-header border-b border-noc-border flex items-center justify-between px-4 lg:px-6 flex-shrink-0">
+          <div className="flex items-center gap-3">
+            <button onClick={() => setMobileMenuOpen(true)} className="lg:hidden p-2 rounded-lg hover:bg-noc-surface text-noc-text-muted">
+              <Menu className="w-5 h-5" />
+            </button>
+            <div className="hidden md:block">
+              <p className="text-xs text-noc-text-muted">PSSN Network Management Platform</p>
+            </div>
           </div>
-          <div className="flex items-center gap-4">
-            <span className="text-xs text-noc-text-muted">
-              {new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
-            </span>
-            <div className="flex items-center gap-2">
-              <BarChart3 className="w-4 h-4 text-noc-text-muted" />
-              <span className="text-xs text-noc-text-muted">v1.0.0</span>
+
+          <div className="flex items-center gap-3">
+            {/* Alerts indicator */}
+            <button className="relative p-2 rounded-lg hover:bg-noc-surface text-noc-text-muted hover:text-noc-text transition-colors">
+              <Bell className="w-4 h-4" />
+              {openAlertCount > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-noc-danger text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                  {openAlertCount}
+                </span>
+              )}
+            </button>
+
+            {/* User menu */}
+            <div className="relative">
+              <button onClick={() => setShowUserMenu(!showUserMenu)} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-noc-surface transition-colors">
+                <div className="w-7 h-7 rounded-full bg-noc-primary/20 flex items-center justify-center">
+                  <User className="w-3.5 h-3.5 text-noc-primary" />
+                </div>
+                <div className="hidden md:block text-left">
+                  <p className="text-xs font-medium text-noc-text">{user?.fullName || 'Admin'}</p>
+                  <p className="text-[10px] text-noc-text-muted">{user?.role === 'super_admin' ? 'Super Admin' : user?.role?.replace(/_/g, ' ')}</p>
+                </div>
+                <ChevronDown className="w-3 h-3 text-noc-text-muted hidden md:block" />
+              </button>
+
+              {showUserMenu && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
+                  <div className="absolute right-0 top-full mt-1 w-48 bg-noc-surface border border-noc-border rounded-lg shadow-xl z-50 py-1">
+                    <div className="px-3 py-2 border-b border-noc-border">
+                      <p className="text-sm font-medium text-noc-text">{user?.fullName}</p>
+                      <p className="text-xs text-noc-text-muted">{user?.email}</p>
+                    </div>
+                    <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-noc-text-muted hover:text-noc-text hover:bg-noc-surface-2 transition-colors">
+                      <Settings className="w-3.5 h-3.5" />
+                      Settings
+                    </button>
+                    <button onClick={handleLogout} className="w-full flex items-center gap-2 px-3 py-2 text-sm text-noc-danger hover:bg-noc-danger/10 transition-colors">
+                      <LogOut className="w-3.5 h-3.5" />
+                      Logout
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </header>
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto p-4 lg:p-6">
-          <Outlet />
+          <div className="animate-fade-in">
+            <Outlet />
+          </div>
         </main>
       </div>
     </div>

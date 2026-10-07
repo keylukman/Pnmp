@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/auth';
-import { Network, Eye, EyeOff, AlertCircle } from 'lucide-react';
+import { Network, Eye, EyeOff, AlertCircle, Shield } from 'lucide-react';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -46,34 +46,37 @@ export default function LoginPage() {
       <div className="relative z-10 w-full max-w-md px-6">
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-noc-primary/10 border border-noc-primary/20 mb-4">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-noc-primary/20 to-blue-600/20 border border-noc-primary/30 mb-4">
             <Network className="w-8 h-8 text-noc-primary" />
           </div>
-          <h1 className="text-2xl font-bold text-noc-text">PNMP</h1>
+          <h1 className="text-2xl font-bold text-noc-text tracking-tight">PNMP</h1>
           <p className="text-sm text-noc-text-muted mt-1">PSSN Network Management Platform</p>
         </div>
 
-        {/* Login form */}
-        <div className="bg-noc-surface border border-noc-border rounded-xl p-6 shadow-xl">
-          <h2 className="text-lg font-semibold text-noc-text mb-1">Sign In</h2>
-          <p className="text-sm text-noc-text-muted mb-6">Enter your credentials to access the platform</p>
-
-          {error && (
-            <div className="flex items-center gap-2 p-3 mb-4 bg-noc-danger/10 border border-noc-danger/20 rounded-lg">
-              <AlertCircle className="w-4 h-4 text-noc-danger flex-shrink-0" />
-              <span className="text-sm text-noc-danger">{error}</span>
-            </div>
-          )}
+        {/* Login card */}
+        <div className="bg-noc-surface border border-noc-border rounded-xl p-6 shadow-2xl shadow-black/20">
+          <div className="mb-6">
+            <h2 className="text-lg font-semibold text-noc-text">Sign In</h2>
+            <p className="text-sm text-noc-text-muted mt-1">Enter your credentials to access the platform</p>
+          </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            {error && (
+              <div className="flex items-center gap-2 p-3 bg-noc-danger/10 border border-noc-danger/20 rounded-lg">
+                <AlertCircle className="w-4 h-4 text-noc-danger flex-shrink-0" />
+                <p className="text-sm text-noc-danger">{error}</p>
+              </div>
+            )}
+
             <div>
               <label className="block text-xs font-medium text-noc-text-muted mb-1.5">Username</label>
               <input
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="w-full px-3 py-2.5 bg-noc-bg border border-noc-border rounded-lg text-sm text-noc-text placeholder-noc-text-muted/50 focus:outline-none focus:border-noc-primary focus:ring-1 focus:ring-noc-primary/50 transition-all"
-                placeholder="Enter username"
+                placeholder="Enter your username"
+                className="w-full px-4 py-2.5 bg-noc-bg border border-noc-border rounded-lg text-sm text-noc-text placeholder-noc-text-muted/50 focus:outline-none focus:border-noc-primary transition-colors"
+                autoFocus
                 required
               />
             </div>
@@ -85,14 +88,14 @@ export default function LoginPage() {
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-3 py-2.5 bg-noc-bg border border-noc-border rounded-lg text-sm text-noc-text placeholder-noc-text-muted/50 focus:outline-none focus:border-noc-primary focus:ring-1 focus:ring-noc-primary/50 transition-all pr-10"
-                  placeholder="Enter password"
+                  placeholder="Enter your password"
+                  className="w-full px-4 py-2.5 pr-10 bg-noc-bg border border-noc-border rounded-lg text-sm text-noc-text placeholder-noc-text-muted/50 focus:outline-none focus:border-noc-primary transition-colors"
                   required
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-noc-text-muted hover:text-noc-text"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-noc-text-muted hover:text-noc-text transition-colors"
                 >
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
@@ -102,27 +105,36 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-2.5 bg-noc-primary hover:bg-noc-primary/90 text-white font-medium text-sm rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              className="w-full py-2.5 bg-noc-primary hover:bg-noc-primary/90 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
             >
               {loading ? (
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                <>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Authenticating...
+                </>
               ) : (
-                'Sign In'
+                <>
+                  <Shield className="w-4 h-4" />
+                  Sign In
+                </>
               )}
             </button>
           </form>
 
-          <div className="mt-4 pt-4 border-t border-noc-border">
-            <p className="text-xs text-noc-text-muted text-center">
-              Demo: Use <span className="text-noc-primary font-mono">admin</span> / <span className="text-noc-primary font-mono">admin</span>
+          <div className="mt-6 pt-4 border-t border-noc-border">
+            <p className="text-[10px] text-noc-text-muted text-center">
+              Demo: Use any username and password to sign in
             </p>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="text-center mt-6">
+        <div className="mt-6 text-center">
           <p className="text-xs text-noc-text-muted">
-            PNMP v1.0.0 • PSSN Network Management Platform
+            Unit Teknologi Informasi • PSSN
+          </p>
+          <p className="text-[10px] text-noc-text-muted/60 mt-1">
+            PNMP v1.0.0 — Enterprise Network Management
           </p>
         </div>
       </div>

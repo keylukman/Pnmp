@@ -1,8 +1,10 @@
 import { useState, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useDeviceStore, Device, DeviceStatus, DeviceRole } from '../stores/devices';
 import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Eye, CheckCircle, XCircle, AlertTriangle, Clock, RefreshCw } from 'lucide-react';
 
 export default function DevicesPage() {
+  const navigate = useNavigate();
   const { devices, sites, deleteDevice, updateDevice } = useDeviceStore();
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -152,7 +154,7 @@ export default function DevicesPage() {
                   <td className="text-xs text-noc-text-muted">{device.uptime}</td>
                   <td>
                     <div className="flex items-center gap-1">
-                      <button className="p-1.5 rounded hover:bg-noc-surface-2 text-noc-text-muted hover:text-noc-primary transition-colors" title="View">
+                      <button onClick={() => navigate(`/devices/${device.id}`)} className="p-1.5 rounded hover:bg-noc-surface-2 text-noc-text-muted hover:text-noc-primary transition-colors" title="View Details">
                         <Eye className="w-3.5 h-3.5" />
                       </button>
                       <button onClick={() => setEditingDevice(device)} className="p-1.5 rounded hover:bg-noc-surface-2 text-noc-text-muted hover:text-noc-warning transition-colors" title="Edit">

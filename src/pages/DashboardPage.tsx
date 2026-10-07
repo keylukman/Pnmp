@@ -1,10 +1,12 @@
 import { useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useDeviceStore } from '../stores/devices';
-import { Server, AlertTriangle, CheckCircle, XCircle, Clock, Activity, ArrowUpRight, ArrowDownRight, Wifi } from 'lucide-react';
+import { Server, AlertTriangle, CheckCircle, XCircle, Clock, Activity, ArrowUpRight, ArrowDownRight, Wifi, TrendingUp, Zap, Globe } from 'lucide-react';
 import ReactECharts from 'echarts-for-react';
 
 export default function DashboardPage() {
   const { devices, alerts, interfaces, events } = useDeviceStore();
+  const navigate = useNavigate();
 
   const stats = useMemo(() => ({
     total: devices.length,
@@ -30,6 +32,18 @@ export default function DashboardPage() {
     return ((up / devices.length) * 100).toFixed(1);
   }, [devices]);
 
+  const avgCpu = useMemo(() => {
+    const activeDevices = devices.filter(d => d.status === 'up');
+    if (activeDevices.length === 0) return 0;
+    return Math.round(activeDevices.reduce((sum, d) => sum + d.cpu, 0) / activeDevices.length);
+  }, [devices]);
+
+  const avgMemory = useMemo(() => {
+    const activeDevices = devices.filter(d => d.status === 'up');
+    if (activeDevices.length === 0) return 0;
+    return Math.round(activeDevices.reduce((sum, d) => sum + d.memory, 0) / activeDevices.length);
+  }, [devices]);
+
   // Chart options
   const donutOption = {
     tooltip: { trigger: 'item' as const, backgroundColor: '#1a1f2e', borderColor: '#2d3548', textStyle: { color: '#e2e8f0', fontSize: 12 } },
@@ -48,7 +62,8 @@ export default function DashboardPage() {
 
   const trafficOption = {
     tooltip: { trigger: 'axis' as const, backgroundColor: '#1a1f2e', borderColor: '#2d3548', textStyle: { color: '#e2e8f0', fontSize: 12 } },
-    grid: { left: 50, right: 20, top: 20, bottom: 30 },
+    legend: { data: ['Inbound', 'Outbound'], textStyle: { color: '#8892a4', fontSize: 10 }, top: 0, right: 0 },
+    grid: { left: 50, right: 20, top: 30, bottom: 30 },
     xAxis: { type: 'category' as const, data: ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00', 'Now'], axisLine: { lineStyle: { color: '#2d3548' } }, axisLabel: { color: '#8892a4', fontSize: 10 } },
     yAxis: { type: 'value' as const, axisLine: { show: false }, splitLine: { lineStyle: { color: '#1e2535' } }, axisLabel: { color: '#8892a4', fontSize: 10, formatter: '{value} Mbps' } },
     series: [
@@ -59,7 +74,8 @@ export default function DashboardPage() {
 
   const cpuMemoryOption = {
     tooltip: { trigger: 'axis' as const, backgroundColor: '#1a1f2e', borderColor: '#2d3548', textStyle: { color: '#e2e8f0', fontSize: 12 } },
-    grid: { left: 40, right: 20, top: 20, bottom: 30 },
+    legend: { data: ['CPU', 'Memory'], textStyle: { color: '#8892a4', fontSize: 10 }, top: 0, right: 0 },
+    grid: { left: 40, right: 20, top: 30, bottom: 30 },
     xAxis: { type: 'category' as const, data: devices.filter(d => d.status === 'up').slice(0, 8).map(d => d.displayName.substring(0, 12)), axisLine: { lineStyle: { color: '#2d3548' } }, axisLabel: { color: '#8892a4', fontSize: 9, rotate: 30 } },
     yAxis: { type: 'value' as const, max: 100, axisLine: { show: false }, splitLine: { lineStyle: { color: '#1e2535' } }, axisLabel: { color: '#8892a4', fontSize: 10, formatter: '{value}%' } },
     series: [
@@ -154,12 +170,52 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Quick metrics row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="bg-noc-surface border border-noc-border rounded-lg p-3 flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-noc-primary/10 flex items-center justify-center">
+            <TrendingUp className="w-4 h-4 text-noc-primary" />
+          </div>
+          <div>
+            <p className="text-[10px] text-noc-text-muted uppercase tracking-wider">Avg CPU</p>
+            <p className="text-lg font-bold text-noc-text">{avgCpu}%</p>
+          </div>
+        </div>
+        <div className="bg-noc-surface border border-noc-border rounded-lg p-3 flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-purple-500/10 flex items-center justify-center">
+            <Zap className="w-4 h-4 text-purple-500" />
+          </div>
+          <div>
+            <p className="text-[10px] text-noc-text-muted uppercase tracking-wider">Avg Memory</p>
+            <p className="text-lg font-bold text-noc-text">{avgMemory}%</p>
+          </div>
+        </div>
+        <div className="bg-noc-surface border border-noc-border rounded-lg p-3 flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-noc-success/10 flex items-center justify-center">
+            <Wifi className="w-4 h-4 text-noc-success" />
+          </div>
+          <div>
+            <p className="text-[10px] text-noc-text-muted uppercase tracking-wider">Interfaces</p>
+            <p className="text-lg font-bold text-noc-text">{interfaces.filter(i => i.status === 'up').length}/{interfaces.length}</p>
+          </div>
+        </div>
+        <div className="bg-noc-surface border border-noc-border rounded-lg p-3 flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-noc-danger/10 flex items-center justify-center">
+            <AlertTriangle className="w-4 h-4 text-noc-danger" />
+          </div>
+          <div>
+            <p className="text-[10px] text-noc-text-muted uppercase tracking-wider">Open Alerts</p>
+            <p className="text-lg font-bold text-noc-danger">{openAlerts.length}</p>
+          </div>
+        </div>
+      </div>
+
       {/* Charts row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Traffic chart */}
         <div className="lg:col-span-2 bg-noc-surface border border-noc-border rounded-lg p-4">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-semibold text-noc-text">Network Traffic</h3>
+            <h3 className="text-sm font-semibold text-noc-text">Network Traffic (24h)</h3>
             <div className="flex items-center gap-4 text-xs">
               <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-noc-primary"></span> Inbound</span>
               <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-noc-success"></span> Outbound</span>
@@ -172,6 +228,15 @@ export default function DashboardPage() {
         <div className="bg-noc-surface border border-noc-border rounded-lg p-4">
           <h3 className="text-sm font-semibold text-noc-text mb-4">Device Distribution</h3>
           <ReactECharts option={donutOption} style={{ height: '200px' }} />
+          <div className="mt-2 grid grid-cols-2 gap-1">
+            {deviceTypeDistribution.slice(0, 6).map((item, i) => (
+              <div key={i} className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: ['#0ea5e9', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'][i] }} />
+                <span className="text-[10px] text-noc-text-muted truncate">{item.name}</span>
+                <span className="text-[10px] text-noc-text ml-auto">{item.value}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -218,7 +283,7 @@ export default function DashboardPage() {
               .sort((a, b) => (b.cpu + b.memory) - (a.cpu + a.memory))
               .slice(0, 6)
               .map((device) => (
-                <div key={device.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-noc-surface-2 transition-colors">
+                <div key={device.id} onClick={() => navigate(`/devices/${device.id}`)} className="flex items-center gap-3 p-2 rounded-lg hover:bg-noc-surface-2 transition-colors cursor-pointer">
                   <div className={`w-2 h-2 rounded-full ${device.status === 'up' ? 'bg-noc-success' : device.status === 'warning' ? 'bg-noc-warning' : 'bg-noc-danger'}`} />
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-medium text-noc-text truncate">{device.displayName}</p>
