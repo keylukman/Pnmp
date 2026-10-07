@@ -1,1 +1,127 @@
 @import "tailwindcss";
+
+@theme {
+  --color-noc-bg: #0f1419;
+  --color-noc-surface: #1a1f2e;
+  --color-noc-surface-2: #232a3b;
+  --color-noc-border: #2d3548;
+  --color-noc-text: #e2e8f0;
+  --color-noc-text-muted: #8892a4;
+  --color-noc-primary: #0ea5e9;
+  --color-noc-success: #22c55e;
+  --color-noc-warning: #f59e0b;
+  --color-noc-danger: #ef4444;
+  --color-noc-info: #3b82f6;
+  --color-noc-sidebar: #141922;
+  --color-noc-header: #111827;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background-color: #0f1419;
+  color: #e2e8f0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1f2e;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3d4555;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4d5565;
+}
+
+/* Status pulse animation */
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(34, 197, 94, 0); }
+}
+
+@keyframes pulse-red {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0); }
+}
+
+.status-up {
+  animation: pulse-green 2s infinite;
+}
+
+.status-down {
+  animation: pulse-red 1.5s infinite;
+}
+
+/* Table styles */
+.noc-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.noc-table th {
+  background: #1a1f2e;
+  padding: 10px 16px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #8892a4;
+  border-bottom: 1px solid #2d3548;
+}
+
+.noc-table td {
+  padding: 10px 16px;
+  font-size: 13px;
+  border-bottom: 1px solid #1e2535;
+  color: #e2e8f0;
+}
+
+.noc-table tr:hover td {
+  background: #1e2535;
+}
+
+/* Gradient backgrounds for cards */
+.card-gradient-up {
+  background: linear-gradient(135deg, #0f2a1a 0%, #1a1f2e 100%);
+  border: 1px solid #1a3d2a;
+}
+
+.card-gradient-down {
+  background: linear-gradient(135deg, #2a0f0f 0%, #1a1f2e 100%);
+  border: 1px solid #3d1a1a;
+}
+
+.card-gradient-warning {
+  background: linear-gradient(135deg, #2a200f 0%, #1a1f2e 100%);
+  border: 1px solid #3d301a;
+}
+
+.card-gradient-info {
+  background: linear-gradient(135deg, #0f1a2a 0%, #1a1f2e 100%);
+  border: 1px solid #1a2a3d;
+}
+
+/* Topology node styles */
+.topology-node {
+  transition: all 0.2s ease;
+}
+
+.topology-node:hover {
+  transform: scale(1.05);
+  filter: brightness(1.2);
+}
