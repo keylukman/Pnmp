@@ -17,14 +17,15 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
 
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 800));
-
-    const success = login(username, password);
-    if (success) {
-      navigate('/');
-    } else {
-      setError('Invalid credentials. Please try again.');
+    try {
+      const success = await login(username, password);
+      if (success) {
+        navigate('/');
+      } else {
+        setError('Invalid credentials. Please try again.');
+      }
+    } catch {
+      setError('Login failed. Please try again.');
     }
     setLoading(false);
   };
@@ -121,9 +122,12 @@ export default function LoginPage() {
             </button>
           </form>
 
-          <div className="mt-6 pt-4 border-t border-noc-border">
+          <div className="mt-6 pt-4 border-t border-noc-border space-y-1">
             <p className="text-[10px] text-noc-text-muted text-center">
               Demo: Use any username and password to sign in
+            </p>
+            <p className="text-[10px] text-noc-text-muted text-center">
+              Backend: <span className="text-noc-primary">admin</span> / <span className="text-noc-primary">admin123</span>
             </p>
           </div>
         </div>
