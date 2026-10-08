@@ -31,12 +31,23 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     
-    # SNMP
-    SNMP_DEFAULT_TIMEOUT: int = 5
-    SNMP_DEFAULT_RETRIES: int = 2
-    SNMP_POLL_INTERVAL: int = 60
+    # Encryption (for device credentials)
+    PNMP_ENCRYPTION_KEY: str = ""
     
-    # Zabbix
+    # Monitoring
+    MONITORING_INTERVAL_SECONDS: int = 60
+    MONITOR_FAILURE_THRESHOLD: int = 3
+    MONITORING_MAX_CONCURRENCY: int = 10
+    METRICS_RETENTION_DAYS: int = 30
+    
+    # SNMP
+    SNMP_TIMEOUT: int = 5
+    SNMP_RETRIES: int = 2
+    
+    # Aruba API
+    ARUBA_API_TIMEOUT: int = 10
+    
+    # Zabbix (Optional)
     ZABBIX_URL: str = ""
     ZABBIX_API_TOKEN: str = ""
     

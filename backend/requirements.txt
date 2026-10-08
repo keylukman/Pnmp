@@ -21,8 +21,17 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.2.1
 
+# Encryption (for device credentials)
+cryptography==44.0.0
+
 # HTTP Client
 httpx==0.28.1
+
+# SNMP (for Phase 2 monitoring)
+# pysnmp==7.1.16  # Uncomment when implementing SNMP collector
+
+# SSH (for Phase 2 monitoring)
+# paramiko==3.5.0  # Uncomment when implementing SSH collector
 
 # Utilities
 python-dotenv==1.0.1
@@ -30,4 +39,3 @@ python-dotenv==1.0.1
 # Testing
 pytest==8.3.4
 pytest-asyncio==0.24.0
-httpx==0.28.1
