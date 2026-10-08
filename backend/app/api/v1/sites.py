@@ -6,9 +6,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from ...core.database import get_db
 from ...core.deps import get_current_user
-from ...models.user import User
-from ...models.site import Site
-from ...models.device import Device
+from ...models import User, Site, Device
 from ...schemas import SiteCreate, SiteUpdate, SiteResponse
 
 router = APIRouter(prefix="/sites", tags=["Sites"])
