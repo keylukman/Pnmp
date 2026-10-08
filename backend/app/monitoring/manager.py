@@ -3,6 +3,7 @@ Monitoring Manager
 Orchestrates device monitoring and data collection
 """
 import asyncio
+import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
@@ -10,10 +11,12 @@ from .adapters import AdapterRegistry
 from ..models import (
     Device, DeviceCredential, DeviceInterface, DeviceMetric,
     InterfaceMetric, Alert, EventLog, DeviceStatus, AlertSeverity,
-    AlertStatus, EventType, MonitoringMethod
+    AlertStatus, EventType, MonitoringMethod, InterfaceStatus
 )
 from ..core.encryption import credential_encryption
 from ..core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class MonitoringManager:
@@ -197,7 +200,9 @@ class MonitoringManager:
         self.db.commit()
     
     async def _update_interfaces(self, device_id: int, interfaces: List[Dict[str, Any]]):
-        """Update or create device interfaces"""
+        """Update or create device interfaces with status change detection"""
+        device = self.db.query(Device).filter(Device.id == device_id).first()
+        
         for iface_data in interfaces:
             # Check if interface exists
             existing = self.db.query(DeviceInterface).filter(
@@ -206,14 +211,39 @@ class MonitoringManager:
             ).first()
             
             if existing:
+                # Detect status changes
+                old_status = existing.status
+                new_status = iface_data.get('status', existing.status)
+                
                 # Update existing interface
                 existing.description = iface_data.get('description', existing.description)
                 existing.alias = iface_data.get('alias', existing.alias)
-                existing.status = iface_data.get('status', existing.status)
+                existing.status = new_status
                 existing.admin_status = iface_data.get('admin_status', existing.admin_status)
                 existing.speed_bps = iface_data.get('speed_bps', existing.speed_bps)
                 existing.mtu = iface_data.get('mtu', existing.mtu)
                 existing.last_polled = datetime.utcnow()
+                
+                # Generate events for status changes
+                if old_status != new_status:
+                    if new_status == 'up' and old_status in ['down', 'unknown']:
+                        await self._create_event(
+                            device_id=device_id,
+                            interface_id=existing.id,
+                            event_type=EventType.INTERFACE_UP,
+                            severity=AlertSeverity.INFO,
+                            message=f"Interface {existing.name} is now UP",
+                            source='monitoring'
+                        )
+                    elif new_status == 'down' and old_status == 'up':
+                        await self._create_event(
+                            device_id=device_id,
+                            interface_id=existing.id,
+                            event_type=EventType.INTERFACE_DOWN,
+                            severity=AlertSeverity.WARNING,
+                            message=f"Interface {existing.name} is now DOWN",
+                            source='monitoring'
+                        )
             else:
                 # Create new interface
                 new_iface = DeviceInterface(
@@ -233,7 +263,9 @@ class MonitoringManager:
         self.db.commit()
     
     async def _store_interface_metrics(self, device_id: int, stats: List[Dict[str, Any]]):
-        """Store interface traffic metrics"""
+        """Store interface traffic metrics with counter delta calculation"""
+        now = datetime.utcnow()
+        
         for stat in stats:
             # Find interface
             iface = self.db.query(DeviceInterface).filter(
@@ -244,10 +276,32 @@ class MonitoringManager:
             if not iface:
                 continue
             
-            # Calculate traffic rates
-            # TODO: Implement delta calculation with previous values
+            # Get current counter values
+            current_rx_bytes = stat.get('rx_bytes', 0)
+            current_tx_bytes = stat.get('tx_bytes', 0)
+            
+            # Calculate traffic rates using counter delta
             rx_bps = 0
             tx_bps = 0
+            
+            if iface.last_polled and iface.rx_bytes is not None and iface.tx_bytes is not None:
+                # Calculate time delta in seconds
+                time_delta = (now - iface.last_polled).total_seconds()
+                
+                if time_delta > 0:
+                    # Calculate byte deltas
+                    rx_delta = current_rx_bytes - iface.rx_bytes
+                    tx_delta = current_tx_bytes - iface.tx_bytes
+                    
+                    # Handle counter reset/rollover
+                    if rx_delta < 0 or tx_delta < 0:
+                        logger.warning(f"Counter reset detected on {device_id}:{iface.name}")
+                        rx_bps = 0
+                        tx_bps = 0
+                    else:
+                        # Calculate bits per second
+                        rx_bps = int((rx_delta * 8) / time_delta)
+                        tx_bps = int((tx_delta * 8) / time_delta)
             
             # Calculate utilization
             util_in = 0
@@ -360,10 +414,11 @@ class MonitoringManager:
             'error_code': result.get('error_code', 'MONITORING_FAILED')
         }
     
-    async def _create_event(self, device_id: int, event_type: EventType, severity: AlertSeverity, message: str, source: str):
+    async def _create_event(self, device_id: int, event_type: EventType, severity: AlertSeverity, message: str, source: str, interface_id: Optional[int] = None):
         """Create event log entry"""
         event = EventLog(
             device_id=device_id,
+            interface_id=interface_id,
             event_type=event_type,
             severity=severity,
             message=message,
