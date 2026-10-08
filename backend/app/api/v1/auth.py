@@ -8,7 +8,7 @@ from datetime import timedelta
 from ...core.database import get_db
 from ...core.security import verify_password, create_access_token
 from ...core.config import settings
-from ...models.user import User
+from ...models import User
 from ...schemas import Token, LoginRequest
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])

@@ -6,8 +6,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from ...core.database import get_db
 from ...core.deps import get_current_user
-from ...models.user import User
-from ...models.device import Device, DeviceCredential, Site
+from ...models import User, Device, DeviceCredential, Site
 from ...schemas import (
     DeviceCreate, DeviceUpdate, DeviceResponse,
     DeviceCredentialCreate, DeviceCredentialResponse, TestConnectionResponse
