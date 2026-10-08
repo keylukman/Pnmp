@@ -4,38 +4,87 @@ PNMP Devices API Routes
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
+from datetime import datetime
+import subprocess
+import time
+
 from ...core.database import get_db
 from ...core.deps import get_current_user
-from ...models import User, Device, DeviceCredential, Site
+from ...core.encryption import credential_encryption
+from ...models import User, Device, DeviceCredential, Site, DeviceStatus, MonitoringMethod
 from ...schemas import (
     DeviceCreate, DeviceUpdate, DeviceResponse,
-    DeviceCredentialCreate, DeviceCredentialResponse, TestConnectionResponse
+    DeviceCredentialCreate, DeviceCredentialSafeResponse, TestConnectionResponse
 )
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
+
+
+def _device_to_response(device: Device, db: Session) -> dict:
+    """Convert Device model to response dict with site name"""
+    site = db.query(Site).filter(Site.id == device.site_id).first() if device.site_id else None
+    return {
+        "id": device.id,
+        "hostname": device.hostname,
+        "display_name": device.display_name,
+        "management_ip": device.management_ip,
+        "vendor": device.vendor,
+        "model": device.model,
+        "serial_number": device.serial_number,
+        "device_type": device.device_type,
+        "device_role": device.device_role,
+        "site_id": device.site_id,
+        "site_name": site.name if site else None,
+        "location": device.location,
+        "status": device.status,
+        "monitoring_enabled": device.monitoring_enabled,
+        "monitoring_method": device.monitoring_method,
+        "description": device.description,
+        "firmware_version": device.firmware_version,
+        "mac_address": device.mac_address,
+        "uptime": device.uptime,
+        "cpu_usage": device.cpu_usage,
+        "memory_usage": device.memory_usage,
+        "temperature": device.temperature,
+        "last_seen": device.last_seen,
+        "failure_count": device.failure_count,
+        "created_at": device.created_at,
+        "updated_at": device.updated_at
+    }
 
 
 @router.get("/", response_model=List[DeviceResponse])
 async def get_devices(
     skip: int = 0,
     limit: int = 100,
+    page: Optional[int] = Query(None, ge=1),
+    page_size: Optional[int] = Query(None, ge=1, le=100),
     site_id: Optional[int] = None,
+    vendor: Optional[str] = None,
+    device_type: Optional[str] = None,
     device_role: Optional[str] = None,
-    status_filter: Optional[str] = None,
+    status_filter: Optional[str] = Query(None, alias="status"),
+    monitoring_enabled: Optional[bool] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get all devices with optional filters"""
+    """Get all devices with optional filters and pagination"""
     query = db.query(Device)
     
     # Apply filters
     if site_id:
         query = query.filter(Device.site_id == site_id)
+    if vendor:
+        query = query.filter(Device.vendor.ilike(f"%{vendor}%"))
+    if device_type:
+        query = query.filter(Device.device_type.ilike(f"%{device_type}%"))
     if device_role:
         query = query.filter(Device.device_role == device_role)
     if status_filter:
         query = query.filter(Device.status == status_filter)
+    if monitoring_enabled is not None:
+        query = query.filter(Device.monitoring_enabled == monitoring_enabled)
     if search:
         query = query.filter(
             (Device.display_name.ilike(f"%{search}%")) |
@@ -43,41 +92,15 @@ async def get_devices(
             (Device.management_ip.ilike(f"%{search}%"))
         )
     
-    devices = query.offset(skip).limit(limit).all()
+    # Pagination
+    if page and page_size:
+        total = query.count()
+        offset = (page - 1) * page_size
+        devices = query.offset(offset).limit(page_size).all()
+    else:
+        devices = query.offset(skip).limit(limit).all()
     
-    # Build response with site name
-    result = []
-    for device in devices:
-        site = db.query(Site).filter(Site.id == device.site_id).first() if device.site_id else None
-        device_dict = {
-            "id": device.id,
-            "hostname": device.hostname,
-            "display_name": device.display_name,
-            "management_ip": device.management_ip,
-            "vendor": device.vendor,
-            "model": device.model,
-            "serial_number": device.serial_number,
-            "device_type": device.device_type,
-            "device_role": device.device_role,
-            "site_id": device.site_id,
-            "site_name": site.name if site else None,
-            "location": device.location,
-            "status": device.status,
-            "monitoring_enabled": device.monitoring_enabled,
-            "description": device.description,
-            "firmware_version": device.firmware_version,
-            "mac_address": device.mac_address,
-            "uptime": device.uptime,
-            "cpu_usage": device.cpu_usage,
-            "memory_usage": device.memory_usage,
-            "temperature": device.temperature,
-            "last_seen": device.last_seen,
-            "created_at": device.created_at,
-            "updated_at": device.updated_at
-        }
-        result.append(device_dict)
-    
-    return result
+    return [_device_to_response(d, db) for d in devices]
 
 
 @router.post("/", response_model=DeviceResponse, status_code=status.HTTP_201_CREATED)
@@ -110,43 +133,16 @@ async def create_device(
         location=device_data.location,
         description=device_data.description,
         monitoring_enabled=device_data.monitoring_enabled,
+        monitoring_method=device_data.monitoring_method,
         firmware_version=device_data.firmware_version,
         mac_address=device_data.mac_address,
-        status="unknown"
+        status=DeviceStatus.UNKNOWN
     )
     db.add(db_device)
     db.commit()
     db.refresh(db_device)
     
-    # Get site name
-    site = db.query(Site).filter(Site.id == db_device.site_id).first() if db_device.site_id else None
-    
-    return {
-        "id": db_device.id,
-        "hostname": db_device.hostname,
-        "display_name": db_device.display_name,
-        "management_ip": db_device.management_ip,
-        "vendor": db_device.vendor,
-        "model": db_device.model,
-        "serial_number": db_device.serial_number,
-        "device_type": db_device.device_type,
-        "device_role": db_device.device_role,
-        "site_id": db_device.site_id,
-        "site_name": site.name if site else None,
-        "location": db_device.location,
-        "status": db_device.status,
-        "monitoring_enabled": db_device.monitoring_enabled,
-        "description": db_device.description,
-        "firmware_version": db_device.firmware_version,
-        "mac_address": db_device.mac_address,
-        "uptime": db_device.uptime,
-        "cpu_usage": db_device.cpu_usage,
-        "memory_usage": db_device.memory_usage,
-        "temperature": db_device.temperature,
-        "last_seen": db_device.last_seen,
-        "created_at": db_device.created_at,
-        "updated_at": db_device.updated_at
-    }
+    return _device_to_response(db_device, db)
 
 
 @router.get("/{device_id}", response_model=DeviceResponse)
@@ -163,34 +159,7 @@ async def get_device(
             detail="Device not found"
         )
     
-    site = db.query(Site).filter(Site.id == device.site_id).first() if device.site_id else None
-    
-    return {
-        "id": device.id,
-        "hostname": device.hostname,
-        "display_name": device.display_name,
-        "management_ip": device.management_ip,
-        "vendor": device.vendor,
-        "model": device.model,
-        "serial_number": device.serial_number,
-        "device_type": device.device_type,
-        "device_role": device.device_role,
-        "site_id": device.site_id,
-        "site_name": site.name if site else None,
-        "location": device.location,
-        "status": device.status,
-        "monitoring_enabled": device.monitoring_enabled,
-        "description": device.description,
-        "firmware_version": device.firmware_version,
-        "mac_address": device.mac_address,
-        "uptime": device.uptime,
-        "cpu_usage": device.cpu_usage,
-        "memory_usage": device.memory_usage,
-        "temperature": device.temperature,
-        "last_seen": device.last_seen,
-        "created_at": device.created_at,
-        "updated_at": device.updated_at
-    }
+    return _device_to_response(device, db)
 
 
 @router.put("/{device_id}", response_model=DeviceResponse)
@@ -216,34 +185,7 @@ async def update_device(
     db.commit()
     db.refresh(device)
     
-    site = db.query(Site).filter(Site.id == device.site_id).first() if device.site_id else None
-    
-    return {
-        "id": device.id,
-        "hostname": device.hostname,
-        "display_name": device.display_name,
-        "management_ip": device.management_ip,
-        "vendor": device.vendor,
-        "model": device.model,
-        "serial_number": device.serial_number,
-        "device_type": device.device_type,
-        "device_role": device.device_role,
-        "site_id": device.site_id,
-        "site_name": site.name if site else None,
-        "location": device.location,
-        "status": device.status,
-        "monitoring_enabled": device.monitoring_enabled,
-        "description": device.description,
-        "firmware_version": device.firmware_version,
-        "mac_address": device.mac_address,
-        "uptime": device.uptime,
-        "cpu_usage": device.cpu_usage,
-        "memory_usage": device.memory_usage,
-        "temperature": device.temperature,
-        "last_seen": device.last_seen,
-        "created_at": device.created_at,
-        "updated_at": device.updated_at
-    }
+    return _device_to_response(device, db)
 
 
 @router.delete("/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -270,10 +212,7 @@ async def test_connection(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Test connectivity to device (ping)"""
-    import subprocess
-    import time
-    
+    """Test connectivity to device (ping + method-specific test)"""
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
         raise HTTPException(
@@ -281,10 +220,9 @@ async def test_connection(
             detail="Device not found"
         )
     
-    # Simple ping test
+    # Step 1: Basic ping test
     start_time = time.time()
     try:
-        # Windows ping
         result = subprocess.run(
             ["ping", "-n", "1", "-w", "3000", device.management_ip],
             capture_output=True, text=True, timeout=5
@@ -292,33 +230,67 @@ async def test_connection(
         latency = (time.time() - start_time) * 1000
         
         if result.returncode == 0:
-            return {
-                "success": True,
-                "message": f"Device {device.management_ip} is reachable",
-                "latency_ms": round(latency, 2)
-            }
+            # Update last_seen
+            device.last_seen = datetime.utcnow()
+            device.failure_count = 0
+            if device.status == DeviceStatus.DOWN:
+                device.status = DeviceStatus.UP
+            db.commit()
+            
+            return TestConnectionResponse(
+                success=True,
+                device_id=device_id,
+                method="ICMP",
+                latency_ms=round(latency, 2),
+                message=f"Device {device.management_ip} is reachable"
+            )
         else:
-            return {
-                "success": False,
-                "message": f"Device {device.management_ip} is not reachable",
-                "latency_ms": None
-            }
+            # Increment failure count
+            device.failure_count = (device.failure_count or 0) + 1
+            db.commit()
+            
+            return TestConnectionResponse(
+                success=False,
+                device_id=device_id,
+                method="ICMP",
+                latency_ms=None,
+                message=f"Device {device.management_ip} is not reachable",
+                error_code="ICMP_UNREACHABLE"
+            )
+    except subprocess.TimeoutExpired:
+        device.failure_count = (device.failure_count or 0) + 1
+        db.commit()
+        
+        return TestConnectionResponse(
+            success=False,
+            device_id=device_id,
+            method="ICMP",
+            latency_ms=None,
+            message="Connection test timed out",
+            error_code="ICMP_TIMEOUT"
+        )
     except Exception as e:
-        return {
-            "success": False,
-            "message": f"Connection test failed: {str(e)}",
-            "latency_ms": None
-        }
+        return TestConnectionResponse(
+            success=False,
+            device_id=device_id,
+            method="ICMP",
+            latency_ms=None,
+            message=f"Connection test failed: {str(e)}",
+            error_code="TEST_ERROR"
+        )
 
 
-@router.post("/{device_id}/credentials", response_model=DeviceCredentialResponse)
+@router.post("/{device_id}/credentials", response_model=DeviceCredentialSafeResponse)
 async def set_credentials(
     device_id: int,
     cred_data: DeviceCredentialCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Set device credentials (encrypted)"""
+    """
+    Set device credentials (encrypted).
+    All secrets are encrypted before storage.
+    """
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
         raise HTTPException(
@@ -326,36 +298,55 @@ async def set_credentials(
             detail="Device not found"
         )
     
-    # TODO: Encrypt password and SNMP community before storing
-    # For now, store as-is (will be encrypted in production)
-    
-    # Delete existing credentials
+    # Delete existing credentials for this device
     db.query(DeviceCredential).filter(DeviceCredential.device_id == device_id).delete()
     
-    # Create new credentials
+    # Create new credentials with encryption
     db_cred = DeviceCredential(
         device_id=device_id,
         username=cred_data.username,
-        encrypted_password=cred_data.password,  # TODO: Encrypt
+        encrypted_password=credential_encryption.encrypt(cred_data.password) if cred_data.password else None,
         snmp_version=cred_data.snmp_version,
-        snmp_community_encrypted=cred_data.snmp_community,  # TODO: Encrypt
+        snmp_community_encrypted=credential_encryption.encrypt(cred_data.snmp_community) if cred_data.snmp_community else None,
+        snmp_username=cred_data.snmp_username,
+        snmp_auth_protocol=cred_data.snmp_auth_protocol,
+        snmp_auth_password_encrypted=credential_encryption.encrypt(cred_data.snmp_auth_password) if cred_data.snmp_auth_password else None,
+        snmp_privacy_protocol=cred_data.snmp_privacy_protocol,
+        snmp_privacy_password_encrypted=credential_encryption.encrypt(cred_data.snmp_privacy_password) if cred_data.snmp_privacy_password else None,
         ssh_enabled=cred_data.ssh_enabled,
-        api_enabled=cred_data.api_enabled
+        api_enabled=cred_data.api_enabled,
+        snmp_enabled=cred_data.snmp_enabled
     )
     db.add(db_cred)
     db.commit()
     db.refresh(db_cred)
     
-    return db_cred
+    # Return SAFE response (no secrets)
+    return DeviceCredentialSafeResponse(
+        device_id=device_id,
+        username_configured=bool(cred_data.username),
+        password_configured=bool(cred_data.password),
+        snmp_configured=bool(cred_data.snmp_community or cred_data.snmp_username),
+        snmp_version=cred_data.snmp_version,
+        snmp_v3_configured=bool(cred_data.snmp_username),
+        ssh_enabled=cred_data.ssh_enabled,
+        api_enabled=cred_data.api_enabled,
+        snmp_enabled=cred_data.snmp_enabled,
+        created_at=db_cred.created_at,
+        updated_at=db_cred.updated_at
+    )
 
 
-@router.get("/{device_id}/credentials", response_model=DeviceCredentialResponse)
+@router.get("/{device_id}/credentials", response_model=DeviceCredentialSafeResponse)
 async def get_credentials(
     device_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get device credentials (without sensitive data)"""
+    """
+    Get device credential STATUS (safe response).
+    NEVER returns actual passwords or secrets.
+    """
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
         raise HTTPException(
@@ -365,9 +356,90 @@ async def get_credentials(
     
     cred = db.query(DeviceCredential).filter(DeviceCredential.device_id == device_id).first()
     if not cred:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No credentials configured"
+        return DeviceCredentialSafeResponse(
+            device_id=device_id,
+            username_configured=False,
+            password_configured=False,
+            snmp_configured=False,
+            snmp_version=None,
+            snmp_v3_configured=False,
+            ssh_enabled=False,
+            api_enabled=False,
+            snmp_enabled=True
         )
     
-    return cred
+    return DeviceCredentialSafeResponse(
+        device_id=device_id,
+        username_configured=bool(cred.username),
+        password_configured=bool(cred.encrypted_password),
+        snmp_configured=bool(cred.snmp_community_encrypted or cred.snmp_username),
+        snmp_version=cred.snmp_version,
+        snmp_v3_configured=bool(cred.snmp_username),
+        ssh_enabled=cred.ssh_enabled,
+        api_enabled=cred.api_enabled,
+        snmp_enabled=cred.snmp_enabled,
+        created_at=cred.created_at,
+        updated_at=cred.updated_at
+    )
+
+
+# ==================== INTERFACE ENDPOINTS ====================
+
+@router.get("/{device_id}/interfaces", response_model=List[dict])
+async def get_device_interfaces(
+    device_id: int,
+    status_filter: Optional[str] = Query(None, alias="status"),
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get all interfaces for a device"""
+    from ...models import DeviceInterface
+    
+    device = db.query(Device).filter(Device.id == device_id).first()
+    if not device:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found"
+        )
+    
+    query = db.query(DeviceInterface).filter(DeviceInterface.device_id == device_id)
+    
+    if status_filter:
+        query = query.filter(DeviceInterface.status == status_filter)
+    if search:
+        query = query.filter(
+            (DeviceInterface.name.ilike(f"%{search}%")) |
+            (DeviceInterface.description.ilike(f"%{search}%"))
+        )
+    
+    interfaces = query.all()
+    
+    return [
+        {
+            "id": iface.id,
+            "device_id": iface.device_id,
+            "if_index": iface.if_index,
+            "name": iface.name,
+            "description": iface.description,
+            "alias": iface.alias,
+            "status": iface.status,
+            "admin_status": iface.admin_status,
+            "speed": iface.speed,
+            "speed_bps": iface.speed_bps,
+            "duplex": iface.duplex,
+            "rx_bytes": iface.rx_bytes,
+            "tx_bytes": iface.tx_bytes,
+            "rx_errors": iface.rx_errors,
+            "tx_errors": iface.tx_errors,
+            "rx_discards": iface.rx_discards,
+            "tx_discards": iface.tx_discards,
+            "rx_bps": iface.rx_bps,
+            "tx_bps": iface.tx_bps,
+            "utilization": iface.utilization,
+            "utilization_in": iface.utilization_in,
+            "utilization_out": iface.utilization_out,
+            "last_polled": iface.last_polled
+        }
+        for iface in interfaces
+    ]

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy.orm import Session
 from app.core.database import SessionLocal, engine, Base
 from app.core.security import get_password_hash
-from app.models.models import User, UserRole, Site, Device, DeviceRole, DeviceStatus
+from app.models.models import User, UserRole, Site, Device, DeviceRole, DeviceStatus, MonitoringMethod
 
 def seed_database():
     """Seed database with initial data"""
@@ -94,6 +94,7 @@ def seed_database():
                 "site_id": sites["Data Center"],
                 "location": "Rack A1",
                 "status": DeviceStatus.UP,
+                "monitoring_method": MonitoringMethod.REST_API,
                 "description": "Main perimeter firewall",
                 "is_demo": True
             },
@@ -108,6 +109,7 @@ def seed_database():
                 "site_id": sites["Gedung PSSN"],
                 "location": "Floor 1, Rack A1",
                 "status": DeviceStatus.UP,
+                "monitoring_method": MonitoringMethod.REST_API,
                 "description": "Core switch AOS-CX",
                 "is_demo": True
             },
@@ -122,6 +124,7 @@ def seed_database():
                 "site_id": sites["Internet Gateway"],
                 "location": "Rack C1",
                 "status": DeviceStatus.UP,
+                "monitoring_method": MonitoringMethod.SNMP,
                 "description": "Core router ISP 1",
                 "is_demo": True
             },

@@ -10,7 +10,7 @@ import logging
 import os
 
 from .core.config import settings
-from .core.database import engine, Base
+from .core.database import engine, Base, SessionLocal
 from .api.router import api_router
 
 # Configure logging
@@ -75,8 +75,30 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy"}
+    """
+    Health check endpoint.
+    Returns status of application and database connectivity.
+    """
+    db_status = "disconnected"
+    
+    try:
+        # Test database connection
+        db = SessionLocal()
+        db.execute("SELECT 1")
+        db.close()
+        db_status = "connected"
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        db_status = "disconnected"
+    
+    overall_status = "healthy" if db_status == "connected" else "unhealthy"
+    
+    return {
+        "status": overall_status,
+        "database": db_status,
+        "monitoring_worker": "not_started",  # Will be updated when monitoring is implemented
+        "version": settings.APP_VERSION
+    }
 
 
 if __name__ == "__main__":
