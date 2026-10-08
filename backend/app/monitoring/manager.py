@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
-from ..adapters import AdapterRegistry
+from .adapters import AdapterRegistry
 from ...models import (
     Device, DeviceCredential, DeviceInterface, DeviceMetric,
     InterfaceMetric, Alert, EventLog, DeviceStatus, AlertSeverity,
