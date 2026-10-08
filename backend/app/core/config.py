@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"  # Ignore unknown env vars for backward compatibility
 
 
 # Global settings instance
