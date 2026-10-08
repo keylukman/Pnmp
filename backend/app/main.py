@@ -11,7 +11,8 @@ import os
 
 from .core.config import settings
 from .core.database import engine, Base, SessionLocal
-from .api.router import api_router
+from .api.router import api_router, ws_router
+from .monitoring import init_scheduler
 
 # Configure logging
 logging.basicConfig(
@@ -32,10 +33,17 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created/verified")
     
+    # Initialize and start monitoring scheduler
+    scheduler = init_scheduler(SessionLocal)
+    await scheduler.start()
+    logger.info("Monitoring scheduler started")
+    
     yield
     
     # Shutdown
     logger.info("Shutting down PNMP...")
+    await scheduler.stop()
+    logger.info("Monitoring scheduler stopped")
 
 
 # Create FastAPI application
@@ -59,6 +67,7 @@ app.add_middleware(
 
 # Include API router
 app.include_router(api_router)
+app.include_router(ws_router)
 
 
 @app.get("/")
@@ -77,9 +86,12 @@ async def root():
 async def health_check():
     """
     Health check endpoint.
-    Returns status of application and database connectivity.
+    Returns status of application, database, and monitoring worker.
     """
+    from .monitoring import get_scheduler
+    
     db_status = "disconnected"
+    monitoring_status = "not_started"
     
     try:
         # Test database connection
@@ -91,12 +103,19 @@ async def health_check():
         logger.error(f"Database health check failed: {e}")
         db_status = "disconnected"
     
+    # Check monitoring scheduler
+    scheduler = get_scheduler()
+    if scheduler and scheduler.running:
+        monitoring_status = "running"
+    elif scheduler:
+        monitoring_status = "stopped"
+    
     overall_status = "healthy" if db_status == "connected" else "unhealthy"
     
     return {
         "status": overall_status,
         "database": db_status,
-        "monitoring_worker": "not_started",  # Will be updated when monitoring is implemented
+        "monitoring_worker": monitoring_status,
         "version": settings.APP_VERSION
     }
 
