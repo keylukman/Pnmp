@@ -27,11 +27,14 @@ cryptography==44.0.0
 # HTTP Client
 httpx==0.28.1
 
-# SNMP (for Phase 2 monitoring)
-# pysnmp==7.1.16  # Uncomment when implementing SNMP collector
+# SNMP (Phase 3 monitoring)
+pysnmp-lextudio==6.1.2
 
-# SSH (for Phase 2 monitoring)
-# paramiko==3.5.0  # Uncomment when implementing SSH collector
+# SSH (Phase 3 monitoring)
+paramiko==3.5.0
+
+# WebSocket
+websockets==14.1
 
 # Utilities
 python-dotenv==1.0.1
