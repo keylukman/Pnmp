@@ -3,7 +3,7 @@ PNMP API Router
 Aggregates all v1 API routes and WebSocket endpoints
 """
 from fastapi import APIRouter
-from .v1 import auth, users, sites, devices, dashboard, alerts, events, metrics, integrations
+from .v1 import auth, users, sites, devices, dashboard, alerts, events, metrics, integrations, monitoring
 from .ws import dashboard as ws_dashboard
 
 api_router = APIRouter(prefix="/api/v1")
@@ -18,6 +18,7 @@ api_router.include_router(alerts.router)
 api_router.include_router(events.router)
 api_router.include_router(metrics.router)
 api_router.include_router(integrations.router)
+api_router.include_router(monitoring.router)
 
 # WebSocket router (no prefix)
 ws_router = APIRouter()
