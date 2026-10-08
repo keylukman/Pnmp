@@ -1,193 +1,247 @@
 # PNMP — PSSN Network Management Platform
 
-Platform Network Management System (NMS) untuk mengelola, memonitor, dan menginventarisasi perangkat jaringan dalam lingkungan kampus/enterprise.
+Platform Network Management System (NMS) untuk Unit Teknologi Informasi PSSN.
 
-## 📋 Prerequisites
+## 📋 Overview
 
-Sebelum memulai, pastikan sudah terinstall:
+PNMP adalah aplikasi enterprise untuk mengelola, memonitor, dan menginventarisasi perangkat jaringan dalam lingkungan kampus.
 
-| Software | Versi Minimal | Download |
-|----------|---------------|----------|
-| **Node.js** | LTS (v18+) | https://nodejs.org |
-| **Git** | v2.30+ | https://git-scm.com |
-| **VS Code** | Latest | https://code.visualstudio.com |
+**Tech Stack:**
+- **Frontend:** React 18 + TypeScript + Vite + Tailwind CSS + ECharts
+- **Backend:** Python 3.12+ + FastAPI + SQLAlchemy + PostgreSQL
+- **Database:** PostgreSQL 16+
 
-### Untuk Full Stack (Phase selanjutnya):
-| Software | Versi Minimal | Download |
-|----------|---------------|----------|
-| **Python** | 3.12+ | https://python.org |
-| **PostgreSQL** | 16+ | https://postgresql.org |
-
----
-
-## 🚀 Quick Start (Frontend Only)
-
-### 1. Install Dependencies
-
-Buka **PowerShell** atau **Terminal**, lalu:
-
-```powershell
-# Masuk ke folder project
-cd PNMP
-
-# Install semua dependency frontend
-npm install
-```
-
-### 2. Jalankan Development Server
-
-```powershell
-npm run dev
-```
-
-Aplikasi akan berjalan di:
-```
-http://localhost:3000
-```
-
-### 3. Login
-
-```
-Username: admin
-Password: admin
-```
-
-### 4. Build untuk Production
-
-```powershell
-npm run build
-```
-
-Hasil build ada di folder `dist/`.
-
----
-
-## 📁 Struktur Project
+## 🏗️ Project Structure
 
 ```
 PNMP/
-├── src/
-│   ├── App.tsx              # Router utama
-│   ├── main.tsx             # Entry point
-│   ├── index.css            # Global styles + NOC theme
-│   ├── layouts/
-│   │   └── MainLayout.tsx   # Layout sidebar + header
-│   ├── pages/
-│   │   ├── LoginPage.tsx    # Halaman login
-│   │   ├── DashboardPage.tsx    # NOC Dashboard
-│   │   ├── DevicesPage.tsx      # Device inventory
-│   │   ├── InterfacesPage.tsx   # Interface monitoring
-│   │   ├── AlertsPage.tsx       # Alert management
-│   │   ├── TopologyPage.tsx     # Network topology
-│   │   ├── WanPage.tsx          # WAN/ISP monitoring
-│   │   ├── SitesPage.tsx        # Site management
-│   │   ├── ReportsPage.tsx      # Reports
-│   │   ├── UsersPage.tsx        # User management
-│   │   └── SettingsPage.tsx     # Platform settings
-│   └── stores/
-│       ├── auth.ts          # Auth state (Zustand)
-│       └── devices.ts       # Device data store
-├── index.html
-├── package.json
-├── vite.config.js
-├── tsconfig.json
-└── README.md
+├── frontend/           → React SPA (yang ini)
+│   ├── src/
+│   │   ├── pages/      → Halaman aplikasi
+│   │   ├── stores/     → Zustand stores
+│   │   ├── services/   → API service
+│   │   └── layouts/    → Layout components
+│   └── package.json
+│
+├── backend/            → FastAPI REST API
+│   ├── app/
+│   │   ├── api/        → API routes
+│   │   ├── core/       → Config, DB, Security
+│   │   ├── models/     → SQLAlchemy models
+│   │   └── schemas/    → Pydantic schemas
+│   ├── requirements.txt
+│   └── README.md
+│
+└── README.md           → File ini
 ```
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- **Node.js** LTS (18+)
+- **Python** 3.12+
+- **PostgreSQL** 16+
+- **Git**
 
 ---
 
-## 🎨 Fitur yang Tersedia (Frontend V1)
+### 1. Frontend Setup
 
-### ✅ Sudah Diimplementasi:
-- [x] Login / Authentication
-- [x] NOC Dashboard dengan grafik real-time
+```powershell
+# Di folder frontend (atau root project ini)
+npm install
+npm run dev
+```
+
+Frontend akan berjalan di: **http://localhost:5173**
+
+---
+
+### 2. Backend Setup
+
+```powershell
+cd backend
+
+# Buat virtual environment
+python -m venv .venv
+.venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Copy environment file
+copy .env.example .env
+```
+
+Edit `backend/.env`:
+```env
+DATABASE_URL=postgresql+psycopg://pnmp:password@localhost:5432/pnmp
+APP_SECRET_KEY=your-random-secret-key-here
+JWT_SECRET_KEY=your-jwt-secret-key-here
+```
+
+### 3. Database Setup
+
+Buka pgAdmin atau psql:
+
+```sql
+CREATE DATABASE pnmp;
+CREATE USER pnmp WITH PASSWORD 'password';
+GRANT ALL PRIVILEGES ON DATABASE pnmp TO pnmp;
+```
+
+### 4. Seed Database
+
+```powershell
+cd backend
+.venv\Scripts\activate
+python seed.py
+```
+
+Ini akan membuat:
+- **Admin:** `admin` / `admin123`
+- **Demo users:** `neteng1` / `password123`
+
+### 5. Run Backend
+
+```powershell
+cd backend
+.venv\Scripts\activate
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Backend akan berjalan di: **http://127.0.0.1:8000**
+Swagger docs: **http://127.0.0.1:8000/docs**
+
+---
+
+## 🔐 Login
+
+| Mode | Username | Password |
+|------|----------|----------|
+| Backend aktif | `admin` | `admin123` |
+| Demo (tanpa backend) | apapun | apapun |
+
+Frontend akan otomatis detect apakah backend tersedia. Jika tidak, akan menggunakan demo mode dengan data lokal.
+
+---
+
+## 📡 API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/auth/login/json` | Login |
+| GET | `/api/v1/users/me` | Current user |
+| GET | `/api/v1/sites/` | List sites |
+| POST | `/api/v1/sites/` | Create site |
+| GET | `/api/v1/devices/` | List devices |
+| POST | `/api/v1/devices/` | Create device |
+| PUT | `/api/v1/devices/{id}` | Update device |
+| DELETE | `/api/v1/devices/{id}` | Delete device |
+| POST | `/api/v1/devices/{id}/test-connection` | Test ping |
+
+Full docs: **http://127.0.0.1:8000/docs**
+
+---
+
+## 📦 Features (V1)
+
+### ✅ Completed
+
+- [x] Login & Authentication (JWT)
+- [x] NOC Dashboard
 - [x] Device Inventory (CRUD)
+- [x] Device Detail Page
+- [x] Site Management
 - [x] Interface Monitoring
 - [x] Alert Management
 - [x] Network Topology
 - [x] WAN Monitoring + SLA
-- [x] Site Management
 - [x] Reports
 - [x] User Management (RBAC)
-- [x] Settings (SNMP, Monitoring, Security)
-- [x] Dark NOC Theme
-- [x] Responsive Layout
+- [x] Settings
+- [x] Backend API (Foundation)
+- [x] Database Models
+- [x] Authentication API
+- [x] Device CRUD API
+- [x] Site CRUD API
 
-### 🔜 Phase Selanjutnya (Backend):
-- [ ] FastAPI Backend
-- [ ] PostgreSQL Database
-- [ ] SNMP Monitoring (pysnmp)
+### 🔄 Next Phase
+
+- [ ] SNMP Polling Worker
 - [ ] Aruba AOS-CX API Adapter
-- [ ] SSH Connector (Paramiko)
+- [ ] SSH Connector
 - [ ] Zabbix Integration
 - [ ] WebSocket Real-time Updates
-- [ ] Background Monitoring Worker
-- [ ] Alembic Migrations
+- [ ] Email Notifications
+- [ ] PDF Report Export
 
 ---
 
 ## 🛠️ Development
 
-```powershell
-# Development server (hot reload)
-npm run dev
-
-# Type checking
-npm run typecheck
-
-# Build production
-npm run build
-```
-
----
-
-## 🔧 Troubleshooting
-
-### Port 3000 sudah dipakai?
-```powershell
-# Cek proses yang menggunakan port 3000
-netstat -ano | findstr :3000
-
-# Kill proses (ganti PID dengan nomor yang ditemukan)
-taskkill /PID <PID> /F
-```
-
-### npm install error?
-```powershell
-# Hapus node_modules dan install ulang
-Remove-Item -Recurse -Force node_modules
-Remove-Item package-lock.json
-npm install
-```
-
-### Node.js version lama?
-```powershell
-# Cek versi
-node --version
-
-# Update ke LTS dari https://nodejs.org
-```
-
----
-
-## 📊 Tech Stack
-
 ### Frontend
-- **React 18** — UI Framework
-- **TypeScript** — Type safety
-- **Vite** — Build tool
-- **Tailwind CSS 4** — Styling
-- **Zustand** — State management
-- **React Router** — Navigation
-- **ECharts** — Charts & graphs
-- **Lucide React** — Icons
+
+```powershell
+npm run dev       # Development server
+npm run build     # Production build
+npm run preview   # Preview production build
+```
+
+### Backend
+
+```powershell
+cd backend
+.venv\Scripts\activate
+
+uvicorn app.main:app --reload     # Dev server
+python seed.py                     # Seed database
+alembic upgrade head              # Run migrations
+alembic revision --autogenerate -m "desc"  # Create migration
+```
 
 ---
 
-## 📝 Lisensi
+## 📝 Environment Variables
 
-Internal use — PSSN Network Management Platform
+### Backend (.env)
+
+```env
+APP_NAME=PNMP
+APP_ENV=development
+APP_SECRET_KEY=change-me-32-chars-min
+DATABASE_URL=postgresql+psycopg://pnmp:password@localhost:5432/pnmp
+JWT_SECRET_KEY=change-me-jwt-secret
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+CORS_ORIGINS=["http://localhost:5173"]
+SNMP_POLL_INTERVAL=60
+```
 
 ---
 
-**PNMP v1.0.0** — PSSN Network Management Platform
+## 🐛 Troubleshooting
+
+### Frontend tidak connect ke backend?
+- Pastikan backend running di port 8000
+- Cek CORS_ORIGINS di .env backend
+- Buka browser console untuk lihat error
+
+### Database connection error?
+- Pastikan PostgreSQL running
+- Cek DATABASE_URL di .env
+- Pastikan database `pnmp` sudah dibuat
+
+### Import error di backend?
+- Pastikan virtual environment aktif
+- `pip install -r requirements.txt`
+
+---
+
+## 📄 License
+
+Internal — PSSN Unit Teknologi Informasi
+
+---
+
+**PNMP V1.0** — Foundation Phase ✅
