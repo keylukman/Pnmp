@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from .adapters import AdapterRegistry
+from .calculator import TrafficCalculator
 from ..models import (
     Device, DeviceCredential, DeviceInterface, DeviceMetric,
     InterfaceMetric, Alert, EventLog, DeviceStatus, AlertSeverity,
@@ -32,99 +33,116 @@ class MonitoringManager:
     
     async def monitor_device(self, device_id: int) -> Dict[str, Any]:
         """
-        Monitor a single device.
+        Monitor a single device with proper transaction management.
         Returns monitoring result with status and metrics.
         """
         async with self.concurrency_limit:
-            device = self.db.query(Device).filter(Device.id == device_id).first()
-            if not device:
-                return {'success': False, 'error': 'Device not found'}
-            
-            # Get credentials
-            cred = self.db.query(DeviceCredential).filter(
-                DeviceCredential.device_id == device_id
-            ).first()
-            
-            if not cred:
+            try:
+                device = self.db.query(Device).filter(Device.id == device_id).first()
+                if not device:
+                    return {'success': False, 'error': 'Device not found'}
+                
+                # Get credentials
+                cred = self.db.query(DeviceCredential).filter(
+                    DeviceCredential.device_id == device_id
+                ).first()
+                
+                if not cred:
+                    return {
+                        'success': False,
+                        'error': 'No credentials configured',
+                        'error_code': 'NO_CREDENTIALS'
+                    }
+                
+                # Decrypt credentials
+                credentials = self._decrypt_credentials(cred)
+                
+                # Get adapter
+                adapter = AdapterRegistry.get_adapter(
+                    device_id=device.id,
+                    management_ip=device.management_ip,
+                    vendor=device.vendor,
+                    device_type=device.device_type,
+                    monitoring_method=device.monitoring_method.value if device.monitoring_method else 'snmp',
+                    credentials=credentials
+                )
+                
+                try:
+                    # Test connection
+                    conn_result = await adapter.test_connection()
+                    
+                    if not conn_result.get('success'):
+                        # Handle failure
+                        result = await self._handle_monitoring_failure(device, conn_result)
+                        self.db.commit()  # Commit failure state
+                        return result
+                    
+                    # Connection successful - collect data
+                    result = {
+                        'success': True,
+                        'device_id': device_id,
+                        'method': conn_result.get('method', 'SNMP'),
+                        'latency_ms': conn_result.get('latency_ms'),
+                        'message': conn_result.get('message')
+                    }
+                    
+                    # Get system info
+                    system_info = await adapter.get_system_info()
+                    if system_info:
+                        result['system_info'] = system_info
+                        
+                        # Store device metrics
+                        await self._store_device_metrics(device_id, system_info)
+                        
+                        # Update device info
+                        device.cpu_usage = system_info.get('cpu')
+                        device.memory_usage = system_info.get('memory')
+                        device.temperature = system_info.get('temperature')
+                        device.uptime = str(system_info.get('uptime_seconds', 0))
+                    
+                    # Get interfaces
+                    interfaces = await adapter.get_interfaces()
+                    if interfaces:
+                        result['interfaces'] = interfaces
+                        
+                        # Update/create interfaces
+                        await self._update_interfaces(device_id, interfaces)
+                    
+                    # Get interface statistics
+                    stats = await adapter.get_interface_statistics()
+                    if stats:
+                        result['interface_stats'] = stats
+                        
+                        # Store interface metrics
+                        await self._store_interface_metrics(device_id, stats)
+                    
+                    # Update device status
+                    await self._handle_monitoring_success(device)
+                    
+                    # Commit all changes in one transaction
+                    self.db.commit()
+                    
+                    return result
+                    
+                except Exception as e:
+                    self.db.rollback()  # Rollback on error
+                    logger.error(f"Error monitoring device {device_id}: {e}")
+                    return await self._handle_monitoring_failure(device, {
+                        'success': False,
+                        'message': str(e),
+                        'error_code': 'MONITORING_ERROR'
+                    })
+                finally:
+                    await adapter.close()
+                    
+            except Exception as e:
+                self.db.rollback()
+                logger.error(f"Critical error in monitor_device {device_id}: {e}")
                 return {
                     'success': False,
-                    'error': 'No credentials configured',
-                    'error_code': 'NO_CREDENTIALS'
+                    'error': str(e),
+                    'error_code': 'CRITICAL_ERROR'
                 }
-            
-            # Decrypt credentials
-            credentials = self._decrypt_credentials(cred)
-            
-            # Get adapter
-            adapter = AdapterRegistry.get_adapter(
-                device_id=device.id,
-                management_ip=device.management_ip,
-                vendor=device.vendor,
-                device_type=device.device_type,
-                monitoring_method=device.monitoring_method.value if device.monitoring_method else 'snmp',
-                credentials=credentials
-            )
-            
-            try:
-                # Test connection
-                conn_result = await adapter.test_connection()
-                
-                if not conn_result.get('success'):
-                    # Handle failure
-                    return await self._handle_monitoring_failure(device, conn_result)
-                
-                # Connection successful - collect data
-                result = {
-                    'success': True,
-                    'device_id': device_id,
-                    'method': conn_result.get('method', 'SNMP'),
-                    'latency_ms': conn_result.get('latency_ms'),
-                    'message': conn_result.get('message')
-                }
-                
-                # Get system info
-                system_info = await adapter.get_system_info()
-                if system_info:
-                    result['system_info'] = system_info
-                    
-                    # Store device metrics
-                    await self._store_device_metrics(device_id, system_info)
-                    
-                    # Update device info
-                    device.cpu_usage = system_info.get('cpu')
-                    device.memory_usage = system_info.get('memory')
-                    device.temperature = system_info.get('temperature')
-                    device.uptime = str(system_info.get('uptime_seconds', 0))
-                
-                # Get interfaces
-                interfaces = await adapter.get_interfaces()
-                if interfaces:
-                    result['interfaces'] = interfaces
-                    
-                    # Update/create interfaces
-                    await self._update_interfaces(device_id, interfaces)
-                
-                # Get interface statistics
-                stats = await adapter.get_interface_statistics()
-                if stats:
-                    result['interface_stats'] = stats
-                    
-                    # Store interface metrics
-                    await self._store_interface_metrics(device_id, stats)
-                
-                # Update device status
-                await self._handle_monitoring_success(device)
-                
-                return result
-                
-            except Exception as e:
-                return await self._handle_monitoring_failure(device, {
-                    'success': False,
-                    'message': str(e),
-                    'error_code': 'MONITORING_ERROR'
-                })
-            finally:
-                await adapter.close()
     
     def _decrypt_credentials(self, cred: DeviceCredential) -> Dict[str, Any]:
         """Decrypt device credentials"""
@@ -197,7 +215,7 @@ class MonitoringManager:
             collection_method='snmp'
         )
         self.db.add(metric)
-        self.db.commit()
+        # No commit here - will be committed by caller
     
     async def _update_interfaces(self, device_id: int, interfaces: List[Dict[str, Any]]):
         """Update or create device interfaces with status change detection"""
@@ -260,10 +278,10 @@ class MonitoringManager:
                 )
                 self.db.add(new_iface)
         
-        self.db.commit()
+        # No commit here - will be committed by caller
     
     async def _store_interface_metrics(self, device_id: int, stats: List[Dict[str, Any]]):
-        """Store interface traffic metrics with counter delta calculation"""
+        """Store interface traffic metrics with proper counter delta calculation"""
         now = datetime.utcnow()
         
         for stat in stats:
@@ -280,81 +298,71 @@ class MonitoringManager:
             current_rx_bytes = stat.get('rx_bytes', 0)
             current_tx_bytes = stat.get('tx_bytes', 0)
             
-            # Calculate traffic rates using counter delta
-            rx_bps = 0
-            tx_bps = 0
+            # Use TrafficCalculator for proper calculation
+            metrics = TrafficCalculator.calculate_interface_metrics(
+                current_rx_bytes=current_rx_bytes,
+                current_tx_bytes=current_tx_bytes,
+                previous_rx_bytes=iface.rx_bytes,
+                previous_tx_bytes=iface.tx_bytes,
+                current_time=now,
+                previous_time=iface.last_polled,
+                speed_bps=iface.speed_bps
+            )
             
-            if iface.last_polled and iface.rx_bytes is not None and iface.tx_bytes is not None:
-                # Calculate time delta in seconds
-                time_delta = (now - iface.last_polled).total_seconds()
-                
-                if time_delta > 0:
-                    # Calculate byte deltas
-                    rx_delta = current_rx_bytes - iface.rx_bytes
-                    tx_delta = current_tx_bytes - iface.tx_bytes
-                    
-                    # Handle counter reset/rollover
-                    if rx_delta < 0 or tx_delta < 0:
-                        logger.warning(f"Counter reset detected on {device_id}:{iface.name}")
-                        rx_bps = 0
-                        tx_bps = 0
-                    else:
-                        # Calculate bits per second
-                        rx_bps = int((rx_delta * 8) / time_delta)
-                        tx_bps = int((tx_delta * 8) / time_delta)
+            # Log counter reset if detected
+            if metrics['is_counter_reset']:
+                logger.info(f"Counter reset detected on device {device_id}, interface {iface.name}")
             
-            # Calculate utilization
-            util_in = 0
-            util_out = 0
-            if iface.speed_bps and iface.speed_bps > 0:
-                util_in = min(100, int((rx_bps / iface.speed_bps) * 100))
-                util_out = min(100, int((tx_bps / iface.speed_bps) * 100))
-            
-            # Store metric
+            # Store metric with NULL values where appropriate
             metric = InterfaceMetric(
                 interface_id=iface.id,
                 device_id=device_id,
-                timestamp=datetime.utcnow(),
-                rx_bytes=stat.get('rx_bytes', 0),
-                tx_bytes=stat.get('tx_bytes', 0),
-                rx_bps=rx_bps,
-                tx_bps=tx_bps,
+                timestamp=now,
+                rx_bytes=current_rx_bytes,
+                tx_bytes=current_tx_bytes,
+                rx_bps=metrics['rx_bps'],  # Can be None
+                tx_bps=metrics['tx_bps'],  # Can be None
                 rx_errors=stat.get('rx_errors', 0),
                 tx_errors=stat.get('tx_errors', 0),
                 rx_discards=stat.get('rx_discards', 0),
                 tx_discards=stat.get('tx_discards', 0),
-                utilization_in=util_in,
-                utilization_out=util_out
+                utilization_in=metrics['utilization_in'],  # Can be None
+                utilization_out=metrics['utilization_out']  # Can be None
             )
             self.db.add(metric)
             
             # Update interface current values
-            iface.rx_bytes = stat.get('rx_bytes', 0)
-            iface.tx_bytes = stat.get('tx_bytes', 0)
-            iface.rx_bps = rx_bps
-            iface.tx_bps = tx_bps
+            iface.rx_bytes = current_rx_bytes
+            iface.tx_bytes = current_tx_bytes
+            iface.rx_bps = metrics['rx_bps'] if metrics['rx_bps'] is not None else 0
+            iface.tx_bps = metrics['tx_bps'] if metrics['tx_bps'] is not None else 0
             iface.rx_errors = stat.get('rx_errors', 0)
             iface.tx_errors = stat.get('tx_errors', 0)
             iface.rx_discards = stat.get('rx_discards', 0)
             iface.tx_discards = stat.get('tx_discards', 0)
-            iface.utilization_in = util_in
-            iface.utilization_out = util_out
+            iface.utilization_in = metrics['utilization_in'] if metrics['utilization_in'] is not None else 0
+            iface.utilization_out = metrics['utilization_out'] if metrics['utilization_out'] is not None else 0
+            
+            # Calculate max utilization for display
+            util_in = metrics['utilization_in'] if metrics['utilization_in'] is not None else 0
+            util_out = metrics['utilization_out'] if metrics['utilization_out'] is not None else 0
             iface.utilization = max(util_in, util_out)
-            iface.last_polled = datetime.utcnow()
+            iface.last_polled = now
         
-        self.db.commit()
+        # No commit here - will be committed by caller
     
     async def _handle_monitoring_success(self, device: Device):
         """Handle successful monitoring"""
         # Reset failure count
         device.failure_count = 0
         device.last_seen = datetime.utcnow()
+        device.last_polled = datetime.utcnow()  # Track last poll time for scheduler
         
         # Check if device was down
         was_down = device.status == DeviceStatus.DOWN
         device.status = DeviceStatus.UP
         
-        self.db.commit()
+        # No commit here - will be committed by caller
         
         # Generate recovery event if was down
         if was_down:
@@ -378,7 +386,7 @@ class MonitoringManager:
         if device.failure_count >= self.failure_threshold:
             was_up = device.status == DeviceStatus.UP
             device.status = DeviceStatus.DOWN
-            self.db.commit()
+            # No commit here - will be committed by caller
             
             # Generate DOWN event
             if was_up or device.status == DeviceStatus.DOWN:
@@ -403,7 +411,7 @@ class MonitoringManager:
             # Still within threshold - mark as warning
             if device.status == DeviceStatus.UP:
                 device.status = DeviceStatus.WARNING
-            self.db.commit()
+            # No commit here - will be committed by caller
         
         return {
             'success': False,
@@ -426,7 +434,7 @@ class MonitoringManager:
             timestamp=datetime.utcnow()
         )
         self.db.add(event)
-        self.db.commit()
+        # No commit here - will be committed by caller
     
     async def _create_or_update_alert(self, device_id: int, severity: AlertSeverity, title: str, description: str, source: str, alert_type: str):
         """Create new alert or update existing one"""
@@ -454,7 +462,7 @@ class MonitoringManager:
             )
             self.db.add(alert)
         
-        self.db.commit()
+        # No commit here - will be committed by caller
     
     async def _resolve_device_alerts(self, device_id: int, alert_type: str):
         """Resolve open alerts for device"""
@@ -468,4 +476,4 @@ class MonitoringManager:
             alert.status = AlertStatus.RESOLVED
             alert.resolved_at = datetime.utcnow()
         
-        self.db.commit()
+        # No commit here - will be committed by caller

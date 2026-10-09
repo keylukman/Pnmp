@@ -70,9 +70,11 @@ class MonitoringScheduler:
                 await asyncio.sleep(5)  # Wait before retry
     
     async def _poll_all_devices(self):
-        """Poll all enabled devices with concurrency control"""
+        """Poll devices that are due based on their individual poll_interval"""
         db = self.db_session_factory()
         try:
+            now = datetime.utcnow()
+            
             # Get all devices with monitoring enabled
             devices = db.query(Device).filter(
                 Device.monitoring_enabled == True,
@@ -83,8 +85,24 @@ class MonitoringScheduler:
                 logger.debug("No devices to monitor")
                 return
             
-            logger.info(f"Polling {len(devices)} devices")
-            self.stats['last_poll'] = datetime.utcnow()
+            # Filter devices that are due for polling
+            devices_to_poll = []
+            for device in devices:
+                if device.last_polled is None:
+                    # Never polled before, poll now
+                    devices_to_poll.append(device)
+                else:
+                    # Check if enough time has passed since last poll
+                    time_since_last_poll = (now - device.last_polled).total_seconds()
+                    if time_since_last_poll >= device.poll_interval:
+                        devices_to_poll.append(device)
+            
+            if not devices_to_poll:
+                logger.debug(f"No devices due for polling (checked {len(devices)} devices)")
+                return
+            
+            logger.info(f"Polling {len(devices_to_poll)} of {len(devices)} devices (others not yet due)")
+            self.stats['last_poll'] = now
             
             # Create monitoring manager
             manager = MonitoringManager(db)
@@ -92,7 +110,7 @@ class MonitoringScheduler:
             # Poll devices concurrently with semaphore limit
             tasks = [
                 self._poll_device_with_semaphore(manager, device.id)
-                for device in devices
+                for device in devices_to_poll
             ]
             
             results = await asyncio.gather(*tasks, return_exceptions=True)
