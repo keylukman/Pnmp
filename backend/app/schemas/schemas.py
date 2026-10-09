@@ -103,7 +103,8 @@ class DeviceBase(BaseModel):
     site_id: Optional[int] = None
     location: Optional[str] = None
     description: Optional[str] = None
-    monitoring_enabled: bool = True
+    # PHASE 3 STEP 8: default OFF — authorized administrators must explicitly enable monitoring
+    monitoring_enabled: bool = False
     monitoring_method: MonitoringMethod = MonitoringMethod.NONE
     polling_interval_seconds: Optional[int] = Field(None, ge=10, le=86400)
 

@@ -5,6 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
+import asyncio
+import ipaddress
+import os
+import re
 import subprocess
 import time
 
@@ -18,6 +22,51 @@ from ...schemas import (
 )
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
+
+
+# PHASE 3 STEP 8 (async API safety): helpers for the connection test.
+# - strict allow-list validation of the stored management IP prevents any
+#   shell-command injection vector (no user-supplied commands are ever run)
+# - ping runs in a bounded worker thread via asyncio.to_thread so the FastAPI
+#   event loop stays responsive during polling/tests
+# - hard timeout enforced on top of the OS-level ping timeout
+
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9\-\.]{0,251}[A-Za-z0-9])?$")
+
+
+def _is_valid_host(value: str) -> bool:
+    """Strictly validate an IPv4/IPv6 address or hostname before use as a ping target."""
+    if not value or len(value) > 253:
+        return False
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        pass
+    return bool(_HOSTNAME_RE.match(value)) and ".." not in value
+
+
+async def _ping_async(target: str, timeout_seconds: int = 5) -> bool:
+    """Run one ICMP ping echo without blocking the event loop.
+
+    The argument list is fixed ('ping', '-n'/'-c', '1', '-w', ms, target);
+    no shell is used and the target is pre-validated by the caller.
+    """
+    if os.name == "nt":
+        cmd = ["ping", "-n", "1", "-w", str(timeout_seconds * 1000), target]
+    else:
+        cmd = ["ping", "-c", "1", "-W", str(timeout_seconds), target]
+
+    def _run():
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout_seconds + 2
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+
+    return await asyncio.to_thread(_run)
 
 
 def _device_to_response(device: Device, db: Session) -> dict:
@@ -223,22 +272,31 @@ async def test_connection(
         )
     
     # Step 1: Basic ping test
+    # PHASE 3 STEP 8: non-blocking (asyncio.to_thread), strict target validation
+    # (no injection vector; fixed argv, no shell), hard timeout, sanitized errors.
+    if not _is_valid_host(device.management_ip):
+        return TestConnectionResponse(
+            success=False,
+            device_id=device_id,
+            method="ICMP",
+            latency_ms=None,
+            message="Device management address is not a valid IP/hostname",
+            error_code="INVALID_TARGET"
+        )
+
     start_time = time.time()
     try:
-        result = subprocess.run(
-            ["ping", "-n", "1", "-w", "3000", device.management_ip],
-            capture_output=True, text=True, timeout=5
-        )
+        reachable = await _ping_async(device.management_ip, timeout_seconds=5)
         latency = (time.time() - start_time) * 1000
-        
-        if result.returncode == 0:
+
+        if reachable:
             # Update last_seen
             device.last_seen = datetime.utcnow()
             device.failure_count = 0
             if device.status == DeviceStatus.DOWN:
                 device.status = DeviceStatus.UP
             db.commit()
-            
+
             return TestConnectionResponse(
                 success=True,
                 device_id=device_id,
@@ -250,7 +308,7 @@ async def test_connection(
             # Increment failure count
             device.failure_count = (device.failure_count or 0) + 1
             db.commit()
-            
+
             return TestConnectionResponse(
                 success=False,
                 device_id=device_id,
@@ -259,25 +317,15 @@ async def test_connection(
                 message=f"Device {device.management_ip} is not reachable",
                 error_code="ICMP_UNREACHABLE"
             )
-    except subprocess.TimeoutExpired:
-        device.failure_count = (device.failure_count or 0) + 1
-        db.commit()
-        
+    except Exception:
+        # PHASE 3 STEP 8: never leak exception details (paths, commands, internals)
+        db.rollback()
         return TestConnectionResponse(
             success=False,
             device_id=device_id,
             method="ICMP",
             latency_ms=None,
-            message="Connection test timed out",
-            error_code="ICMP_TIMEOUT"
-        )
-    except Exception as e:
-        return TestConnectionResponse(
-            success=False,
-            device_id=device_id,
-            method="ICMP",
-            latency_ms=None,
-            message=f"Connection test failed: {str(e)}",
+            message="Connection test failed",
             error_code="TEST_ERROR"
         )
 

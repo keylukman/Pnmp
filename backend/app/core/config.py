@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     
     # Aruba API
     ARUBA_API_TIMEOUT: int = 10
+    # PHASE 3 STEP 8 (TLS): verification is ON by default. Set ARUBA_TLS_VERIFY=false
+    # only deliberately for lab devices with self-signed certificates; prefer
+    # ARUBA_CA_CERT_FILE pointing to a CA bundle instead.
+    ARUBA_TLS_VERIFY: bool = True
+    ARUBA_CA_CERT_FILE: str = ""
     
     # Zabbix (Optional)
     ZABBIX_URL: str = ""

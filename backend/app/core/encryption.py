@@ -3,9 +3,12 @@ PNMP Encryption Service
 Handles encryption/decryption of sensitive credentials using Fernet (AES-128-CBC)
 """
 import base64
+import logging
 import os
 from cryptography.fernet import Fernet, InvalidToken
 from ..core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class CredentialEncryptionError(Exception):
@@ -37,15 +40,46 @@ class CredentialEncryption:
         key = settings.PNMP_ENCRYPTION_KEY
         
         if not key:
-            # Generate a key for development if not set
-            # WARNING: This means credentials won't survive restarts in dev!
-            if settings.APP_ENV == "development":
-                key = Fernet.generate_key().decode()
-                # In production, this would be an error
-            else:
+            # PHASE 3 STEP 8: Never silently generate a new key per process start —
+            # doing so made previously encrypted credentials permanently unreadable
+            # after every restart and violated the no-auto-rotation requirement.
+            if settings.APP_ENV.lower() in ("production", "prod"):
                 raise CredentialEncryptionError(
-                    "PNMP_ENCRYPTION_KEY not set. "
-                    "Generate one with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+                    "PNMP_ENCRYPTION_KEY is required in production but is not set. "
+                    "Set it in .env or the environment. Generate a key with: "
+                    "python -c \"from cryptography.fernet import Fernet; "
+                    "print(Fernet.generate_key().decode())\"  "
+                    "(store it securely; never commit it). If existing DeviceCredential "
+                    "rows were encrypted with the old auto-generated dev key, they must "
+                    "be re-entered once — the old key was ephemeral and cannot be recovered."
+                )
+            # Development fallback: stable per-file key under backend/.dev_encryption.key
+            # (gitignored) so encrypted credentials survive restarts without silently
+            # rotating the key on every startup. NEVER log the key value.
+            key_file = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                ".dev_encryption.key"
+            )
+            try:
+                if os.path.exists(key_file):
+                    with open(key_file, "r") as f:
+                        key = f.read().strip()
+                if not key:
+                    key = Fernet.generate_key().decode()
+                    with open(key_file, "w") as f:
+                        f.write(key)
+                    try:
+                        os.chmod(key_file, 0o600)
+                    except OSError:
+                        pass  # Windows ACLs handled by NTFS defaults
+                    logger.warning(
+                        "PNMP_ENCRYPTION_KEY not set: generated persistent development key file "
+                        "%s (mode 600, gitignored). Set PNMP_ENCRYPTION_KEY in .env for production.",
+                        key_file,
+                    )
+            except OSError as e:
+                raise CredentialEncryptionError(
+                    f"PNMP_ENCRYPTION_KEY not set and development key file could not be created: {e}"
                 )
         
         # Ensure key is properly formatted for Fernet

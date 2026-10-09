@@ -2,7 +2,7 @@
 PNMP Database Models
 SQLAlchemy ORM models for all entities
 """
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Enum as SQLEnum, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -114,7 +114,9 @@ class Device(Base):
     site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
     location = Column(String(200), nullable=True)  # Floor, Rack, Room
     status = Column(SQLEnum(DeviceStatus), default=DeviceStatus.UNKNOWN, nullable=False)
-    monitoring_enabled = Column(Boolean, default=True, nullable=False)
+    # PHASE 3 STEP 8: monitoring is OFF by default; an authorized administrator must
+    # explicitly enable it per device (scheduler only polls monitoring_enabled == True).
+    monitoring_enabled = Column(Boolean, default=False, server_default=text('false'), nullable=False)
     description = Column(Text, nullable=True)
     firmware_version = Column(String(50), nullable=True)
     mac_address = Column(String(17), nullable=True)
