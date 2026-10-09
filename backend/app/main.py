@@ -88,6 +88,7 @@ async def health_check():
     Health check endpoint.
     Returns status of application, database, and monitoring worker.
     """
+    from sqlalchemy import text
     from .monitoring import get_scheduler
     
     db_status = "disconnected"
@@ -96,11 +97,14 @@ async def health_check():
     try:
         # Test database connection
         db = SessionLocal()
-        db.execute("SELECT 1")
-        db.close()
+        try:
+            db.execute(text("SELECT 1"))
+        finally:
+            db.close()
         db_status = "connected"
     except Exception as e:
-        logger.error(f"Database health check failed: {e}")
+        # Never leak exception details/stack traces in the response
+        logger.error("Database health check failed")
         db_status = "disconnected"
     
     # Check monitoring scheduler

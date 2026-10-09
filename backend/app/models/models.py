@@ -124,6 +124,7 @@ class Device(Base):
     temperature = Column(Integer, nullable=True)
     last_seen = Column(DateTime(timezone=True), nullable=True)
     monitoring_method = Column(SQLEnum(MonitoringMethod), default=MonitoringMethod.NONE, nullable=False)
+    polling_interval_seconds = Column(Integer, nullable=True)  # Per-device poll interval override (NULL = global default)
     failure_count = Column(Integer, default=0, nullable=False)  # For status calculation
     is_demo = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

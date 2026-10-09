@@ -39,6 +39,7 @@ def _device_to_response(device: Device, db: Session) -> dict:
         "status": device.status,
         "monitoring_enabled": device.monitoring_enabled,
         "monitoring_method": device.monitoring_method,
+        "polling_interval_seconds": device.polling_interval_seconds,
         "description": device.description,
         "firmware_version": device.firmware_version,
         "mac_address": device.mac_address,
@@ -134,6 +135,7 @@ async def create_device(
         description=device_data.description,
         monitoring_enabled=device_data.monitoring_enabled,
         monitoring_method=device_data.monitoring_method,
+        polling_interval_seconds=device_data.polling_interval_seconds,
         firmware_version=device_data.firmware_version,
         mac_address=device_data.mac_address,
         status=DeviceStatus.UNKNOWN
