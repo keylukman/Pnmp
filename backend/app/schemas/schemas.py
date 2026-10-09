@@ -105,6 +105,7 @@ class DeviceBase(BaseModel):
     description: Optional[str] = None
     monitoring_enabled: bool = True
     monitoring_method: MonitoringMethod = MonitoringMethod.NONE
+    polling_interval_seconds: Optional[int] = Field(None, ge=10, le=86400)
 
 
 class DeviceCreate(DeviceBase):

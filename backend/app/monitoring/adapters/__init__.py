@@ -40,6 +40,9 @@ class AdapterRegistry:
         # Default to SNMP for all other cases
         if monitoring_method in ['snmp', 'multi', 'none', '']:
             return GenericSNMPAdapter(device_id, management_ip, credentials)
-        
-        # Fallback to SNMP
-        return GenericSNMPAdapter(device_id, management_ip, credentials)
+
+        # No adapter implemented for this method (e.g. zabbix, ssh).
+        # Fail explicitly instead of silently falling back to SNMP —
+        # a silent fallback would poll devices via a protocol the
+        # operator never configured them for.
+        raise ValueError(f"No adapter available for monitoring method '{monitoring_method}'")

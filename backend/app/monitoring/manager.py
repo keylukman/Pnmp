@@ -18,6 +18,12 @@ from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Maps internal alert_type keys to the deterministic alert title prefixes
+# used when creating alerts. Used for alert deduplication/resolution lookups.
+ALERT_TITLE_PREFIXES = {
+    'device_down': 'Device DOWN',
+}
+
 
 class MonitoringManager:
     """
@@ -55,15 +61,23 @@ class MonitoringManager:
             # Decrypt credentials
             credentials = self._decrypt_credentials(cred)
             
-            # Get adapter
-            adapter = AdapterRegistry.get_adapter(
-                device_id=device.id,
-                management_ip=device.management_ip,
-                vendor=device.vendor,
-                device_type=device.device_type,
-                monitoring_method=device.monitoring_method.value if device.monitoring_method else 'snmp',
-                credentials=credentials
-            )
+            # Get adapter (fail explicitly if no adapter for the method)
+            try:
+                adapter = AdapterRegistry.get_adapter(
+                    device_id=device.id,
+                    management_ip=device.management_ip,
+                    vendor=device.vendor,
+                    device_type=device.device_type,
+                    monitoring_method=device.monitoring_method.value if device.monitoring_method else 'snmp',
+                    credentials=credentials
+                )
+            except ValueError as e:
+                logger.warning(f"No adapter available for device {device_id}")
+                return await self._handle_monitoring_failure(device, {
+                    'success': False,
+                    'message': str(e),
+                    'error_code': 'UNSUPPORTED_METHOD'
+                })
             
             try:
                 # Test connection
@@ -118,9 +132,12 @@ class MonitoringManager:
                 return result
                 
             except Exception as e:
+                # Log details server-side only; never expose exception text
+                # (may contain IPs/community hints) to API consumers.
+                logger.error(f"Monitoring error on device {device_id}: {type(e).__name__}")
                 return await self._handle_monitoring_failure(device, {
                     'success': False,
-                    'message': str(e),
+                    'message': 'Monitoring error',
                     'error_code': 'MONITORING_ERROR'
                 })
             finally:
@@ -276,71 +293,90 @@ class MonitoringManager:
             if not iface:
                 continue
             
-            # Get current counter values
-            current_rx_bytes = stat.get('rx_bytes', 0)
-            current_tx_bytes = stat.get('tx_bytes', 0)
-            
-            # Calculate traffic rates using counter delta
-            rx_bps = 0
-            tx_bps = 0
-            
-            if iface.last_polled and iface.rx_bytes is not None and iface.tx_bytes is not None:
+            # Current counter values — missing counters stay None (unavailable),
+            # they are NOT fabricated as zero.
+            current_rx_bytes = stat.get('rx_bytes')
+            current_tx_bytes = stat.get('tx_bytes')
+
+            # Rates & utilization are only meaningful with a valid previous
+            # sample (baseline). On the FIRST poll we store raw counters and
+            # leave rates NULL rather than inventing zeros.
+            rx_bps = None
+            tx_bps = None
+            util_in = None
+            util_out = None
+
+            have_baseline = (
+                iface.last_polled is not None
+                and iface.rx_bytes is not None
+                and iface.tx_bytes is not None
+                and current_rx_bytes is not None
+                and current_tx_bytes is not None
+            )
+            if have_baseline:
                 # Calculate time delta in seconds
                 time_delta = (now - iface.last_polled).total_seconds()
-                
+
                 if time_delta > 0:
-                    # Calculate byte deltas
+                    # bps = (current_bytes - previous_bytes) * 8 / elapsed_seconds
                     rx_delta = current_rx_bytes - iface.rx_bytes
                     tx_delta = current_tx_bytes - iface.tx_bytes
-                    
-                    # Handle counter reset/rollover
+
+                    # Handle counter reset/rollover: never produce negative
+                    # traffic; mark this cycle's rates as unavailable (None).
                     if rx_delta < 0 or tx_delta < 0:
                         logger.warning(f"Counter reset detected on {device_id}:{iface.name}")
-                        rx_bps = 0
-                        tx_bps = 0
+                        rx_bps = None
+                        tx_bps = None
                     else:
-                        # Calculate bits per second
                         rx_bps = int((rx_delta * 8) / time_delta)
                         tx_bps = int((tx_delta * 8) / time_delta)
-            
-            # Calculate utilization
-            util_in = 0
-            util_out = 0
-            if iface.speed_bps and iface.speed_bps > 0:
-                util_in = min(100, int((rx_bps / iface.speed_bps) * 100))
-                util_out = min(100, int((tx_bps / iface.speed_bps) * 100))
+
+                    # Utilization requires known interface speed; when speed
+                    # is unknown it remains NULL — never fabricated.
+                    if iface.speed_bps and iface.speed_bps > 0 and rx_bps is not None and tx_bps is not None:
+                        util_in = min(100, int((rx_bps / iface.speed_bps) * 100))
+                        util_out = min(100, int((tx_bps / iface.speed_bps) * 100))
+
+            # Errors/discards: preserve "unknown" as None instead of fake 0
+            rx_errors = stat.get('rx_errors')
+            tx_errors = stat.get('tx_errors')
+            rx_discards = stat.get('rx_discards')
+            tx_discards = stat.get('tx_discards')
             
             # Store metric
             metric = InterfaceMetric(
                 interface_id=iface.id,
                 device_id=device_id,
                 timestamp=datetime.utcnow(),
-                rx_bytes=stat.get('rx_bytes', 0),
-                tx_bytes=stat.get('tx_bytes', 0),
+                rx_bytes=current_rx_bytes,
+                tx_bytes=current_tx_bytes,
                 rx_bps=rx_bps,
                 tx_bps=tx_bps,
-                rx_errors=stat.get('rx_errors', 0),
-                tx_errors=stat.get('tx_errors', 0),
-                rx_discards=stat.get('rx_discards', 0),
-                tx_discards=stat.get('tx_discards', 0),
+                rx_errors=rx_errors,
+                tx_errors=tx_errors,
+                rx_discards=rx_discards,
+                tx_discards=tx_discards,
                 utilization_in=util_in,
                 utilization_out=util_out
             )
             self.db.add(metric)
             
-            # Update interface current values
-            iface.rx_bytes = stat.get('rx_bytes', 0)
-            iface.tx_bytes = stat.get('tx_bytes', 0)
+            # Update interface current values (counters + last_polled form the
+            # baseline for the next delta calculation)
+            iface.rx_bytes = current_rx_bytes
+            iface.tx_bytes = current_tx_bytes
             iface.rx_bps = rx_bps
             iface.tx_bps = tx_bps
-            iface.rx_errors = stat.get('rx_errors', 0)
-            iface.tx_errors = stat.get('tx_errors', 0)
-            iface.rx_discards = stat.get('rx_discards', 0)
-            iface.tx_discards = stat.get('tx_discards', 0)
+            iface.rx_errors = rx_errors
+            iface.tx_errors = tx_errors
+            iface.rx_discards = rx_discards
+            iface.tx_discards = tx_discards
             iface.utilization_in = util_in
             iface.utilization_out = util_out
-            iface.utilization = max(util_in, util_out)
-            iface.last_polled = datetime.utcnow()
+            if util_in is not None or util_out is not None:
+                iface.utilization = max(util_in or 0, util_out or 0)
+            iface.last_polled = now
         
         self.db.commit()
     
@@ -376,12 +412,13 @@ class MonitoringManager:
         
         # Check if threshold reached
         if device.failure_count >= self.failure_threshold:
-            was_up = device.status == DeviceStatus.UP
+            was_down = device.status == DeviceStatus.DOWN
             device.status = DeviceStatus.DOWN
             self.db.commit()
             
-            # Generate DOWN event
-            if was_up or device.status == DeviceStatus.DOWN:
+            # Generate DOWN event only on actual state transition
+            # (prevents duplicate events/alerts every polling cycle while already DOWN)
+            if not was_down:
                 await self._create_event(
                     device_id=device.id,
                     event_type=EventType.DEVICE_DOWN,
@@ -431,10 +468,14 @@ class MonitoringManager:
     async def _create_or_update_alert(self, device_id: int, severity: AlertSeverity, title: str, description: str, source: str, alert_type: str):
         """Create new alert or update existing one"""
         # Check for existing open alert of same type
+        # Match open alerts created by this manager for this alert type.
+        # Titles are formatted as "<Type prefix>: <device>", so filter by
+        # the deterministic prefix rather than a substring of the description.
+        title_prefix = ALERT_TITLE_PREFIXES.get(alert_type, alert_type)
         existing = self.db.query(Alert).filter(
             Alert.device_id == device_id,
             Alert.status.in_([AlertStatus.OPEN, AlertStatus.ACKNOWLEDGED]),
-            Alert.title.like(f"%{alert_type}%")
+            Alert.title.like(f"{title_prefix}:%")
         ).first()
         
         if existing:
@@ -458,10 +499,11 @@ class MonitoringManager:
     
     async def _resolve_device_alerts(self, device_id: int, alert_type: str):
         """Resolve open alerts for device"""
+        title_prefix = ALERT_TITLE_PREFIXES.get(alert_type, alert_type)
         alerts = self.db.query(Alert).filter(
             Alert.device_id == device_id,
             Alert.status.in_([AlertStatus.OPEN, AlertStatus.ACKNOWLEDGED]),
-            Alert.title.like(f"%{alert_type}%")
+            Alert.title.like(f"{title_prefix}:%")
         ).all()
         
         for alert in alerts:
