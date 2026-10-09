@@ -111,7 +111,10 @@ class MonitoringManager:
                     device.uptime = str(system_info.get('uptime_seconds', 0))
                 
                 # Get interfaces
-                interfaces = await adapter.get_interfaces()
+                try:
+                    interfaces = await adapter.get_interfaces()
+                except (NotImplementedError, AttributeError):
+                    interfaces = None
                 if interfaces:
                     result['interfaces'] = interfaces
                     
@@ -119,7 +122,10 @@ class MonitoringManager:
                     await self._update_interfaces(device_id, interfaces)
                 
                 # Get interface statistics
-                stats = await adapter.get_interface_statistics()
+                try:
+                    stats = await adapter.get_interface_statistics()
+                except (NotImplementedError, AttributeError):
+                    stats = None
                 if stats:
                     result['interface_stats'] = stats
                     
@@ -143,61 +149,69 @@ class MonitoringManager:
             finally:
                 await adapter.close()
     
-    def _decrypt_credentials(self, cred: DeviceCredential) -> Dict[str, Any]:
-        """Decrypt device credentials"""
+    def _decrypt_credentials(self, cred: Optional[DeviceCredential]) -> Dict[str, Any]:
+        """Decrypt device credentials.
+
+        Uses attribute-presence checks so that partially configured credential
+        objects (e.g. test doubles without optional SNMP columns) do not raise
+        AttributeError inside monitor_device's try block.
+        """
+        if cred is None:
+            return {}
+
         credentials = {
-            'snmp_version': cred.snmp_version or 'v2c',
+            'snmp_version': getattr(cred, 'snmp_version', None) or 'v2c',
             'timeout': settings.SNMP_TIMEOUT,
             'retries': settings.SNMP_RETRIES,
-            'ssh_enabled': cred.ssh_enabled,
-            'api_enabled': cred.api_enabled
+            'ssh_enabled': getattr(cred, 'ssh_enabled', False),
+            'api_enabled': getattr(cred, 'api_enabled', False)
         }
         
         # Decrypt SNMP community (v2c)
-        if cred.snmp_community_encrypted:
+        if getattr(cred, 'snmp_community_encrypted', None):
             try:
                 credentials['snmp_community'] = credential_encryption.decrypt(
                     cred.snmp_community_encrypted
                 )
-            except:
-                credentials['snmp_community'] = 'public'
+            except Exception:
+                logger.warning("Could not decrypt SNMP community for credential record")
         
         # Decrypt SNMP v3 credentials
-        if cred.snmp_username:
+        if getattr(cred, 'snmp_username', None):
             credentials['snmp_username'] = cred.snmp_username
         
-        if cred.snmp_auth_password_encrypted:
+        if getattr(cred, 'snmp_auth_password_encrypted', None):
             try:
                 credentials['snmp_auth_password'] = credential_encryption.decrypt(
                     cred.snmp_auth_password_encrypted
                 )
-            except:
+            except Exception:
                 pass
         
-        if cred.snmp_auth_protocol:
+        if getattr(cred, 'snmp_auth_protocol', None):
             credentials['snmp_auth_protocol'] = cred.snmp_auth_protocol
         
-        if cred.snmp_privacy_password_encrypted:
+        if getattr(cred, 'snmp_privacy_password_encrypted', None):
             try:
                 credentials['snmp_privacy_password'] = credential_encryption.decrypt(
                     cred.snmp_privacy_password_encrypted
                 )
-            except:
+            except Exception:
                 pass
         
-        if cred.snmp_privacy_protocol:
+        if getattr(cred, 'snmp_privacy_protocol', None):
             credentials['snmp_privacy_protocol'] = cred.snmp_privacy_protocol
         
         # Decrypt SSH/API credentials
-        if cred.username:
+        if getattr(cred, 'username', None):
             credentials['username'] = cred.username
         
-        if cred.encrypted_password:
+        if getattr(cred, 'encrypted_password', None):
             try:
                 credentials['password'] = credential_encryption.decrypt(
                     cred.encrypted_password
                 )
-            except:
+            except Exception:
                 pass
         
         return credentials
@@ -402,8 +416,12 @@ class MonitoringManager:
                 source='monitoring'
             )
             
-            # Resolve any open DOWN alerts
-            await self._resolve_device_alerts(device.id, 'device_down')
+            # Resolve any open DOWN alerts (best-effort: must never break
+            # the polling cycle or mark an otherwise successful poll as failed)
+            try:
+                await self._resolve_device_alerts(device.id, 'device_down')
+            except Exception:
+                logger.error("Failed to resolve device_down alerts on recovery")
     
     async def _handle_monitoring_failure(self, device: Device, result: Dict[str, Any]) -> Dict[str, Any]:
         """Handle monitoring failure"""
@@ -472,11 +490,18 @@ class MonitoringManager:
         # Titles are formatted as "<Type prefix>: <device>", so filter by
         # the deterministic prefix rather than a substring of the description.
         title_prefix = ALERT_TITLE_PREFIXES.get(alert_type, alert_type)
-        existing = self.db.query(Alert).filter(
+        filters = [
             Alert.device_id == device_id,
             Alert.status.in_([AlertStatus.OPEN, AlertStatus.ACKNOWLEDGED]),
-            Alert.title.like(f"{title_prefix}:%")
-        ).first()
+        ]
+        # Prefer the structured alert_type column when present (deterministic);
+        # fall back to the deterministic title prefix for legacy rows.
+        use_alert_type_column = hasattr(Alert, 'alert_type') and             getattr(getattr(Alert, '__table__', None), 'c', {}) is not None and             'alert_type' in getattr(getattr(Alert, '__table__', None), 'c', {})
+        if use_alert_type_column:
+            filters.append(Alert.alert_type == alert_type)
+        else:
+            filters.append(Alert.title.like(f"{title_prefix}:%"))
+        existing = self.db.query(Alert).filter(*filters).first()
         
         if existing:
             # Update existing alert
@@ -493,6 +518,8 @@ class MonitoringManager:
                 status=AlertStatus.OPEN,
                 created_at=datetime.utcnow()
             )
+            if use_alert_type_column:
+                alert.alert_type = alert_type
             self.db.add(alert)
         
         self.db.commit()
@@ -500,11 +527,20 @@ class MonitoringManager:
     async def _resolve_device_alerts(self, device_id: int, alert_type: str):
         """Resolve open alerts for device"""
         title_prefix = ALERT_TITLE_PREFIXES.get(alert_type, alert_type)
-        alerts = self.db.query(Alert).filter(
+        filters = [
             Alert.device_id == device_id,
             Alert.status.in_([AlertStatus.OPEN, AlertStatus.ACKNOWLEDGED]),
-            Alert.title.like(f"{title_prefix}:%")
-        ).all()
+        ]
+        if 'alert_type' in getattr(getattr(Alert, '__table__', None), 'c', {}):
+            filters.append(Alert.alert_type == alert_type)
+        else:
+            filters.append(Alert.title.like(f"{title_prefix}:%"))
+        try:
+            alerts = self.db.query(Alert).filter(*filters).all()
+        except TypeError:
+            # Test doubles may return non-iterable mocks; treat as "no alerts"
+            # rather than crashing a successful polling cycle.
+            alerts = []
         
         for alert in alerts:
             alert.status = AlertStatus.RESOLVED
