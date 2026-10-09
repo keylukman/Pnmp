@@ -1,1 +1,3 @@
-# Tests package
+"""
+PNMP Backend Tests Package
+"""
