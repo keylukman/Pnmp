@@ -125,6 +125,8 @@ class Device(Base):
     last_seen = Column(DateTime(timezone=True), nullable=True)
     monitoring_method = Column(SQLEnum(MonitoringMethod), default=MonitoringMethod.NONE, nullable=False)
     failure_count = Column(Integer, default=0, nullable=False)  # For status calculation
+    poll_interval = Column(Integer, default=60, nullable=False)  # Per-device polling interval in seconds
+    last_polled = Column(DateTime(timezone=True), nullable=True)  # Last successful poll time
     is_demo = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
