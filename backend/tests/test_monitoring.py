@@ -90,17 +90,42 @@ class TestMonitoringManager:
     @pytest.mark.asyncio
     async def test_monitor_device_success(self, mock_db, mock_device):
         """Test successful device monitoring"""
-        # Setup mocks
-        mock_db.query.return_value.filter.return_value.first.return_value = mock_device
-        
+        # Setup mocks: first query -> Device, second query -> DeviceCredential
+        cred = Mock()
+        cred.snmp_version = 'v2c'
+        cred.snmp_community_encrypted = None
+        cred.snmp_username = None
+        cred.snmp_auth_password_encrypted = None
+        cred.snmp_auth_protocol = None
+        cred.snmp_privacy_password_encrypted = None
+        cred.snmp_privacy_protocol = None
+        cred.username = None
+        cred.encrypted_password = None
+        cred.ssh_enabled = False
+        cred.api_enabled = False
+        mock_db.query.return_value.filter.return_value.first.side_effect = [mock_device, cred]
+
         with patch('app.monitoring.manager.AdapterRegistry.get_adapter') as mock_get_adapter:
             mock_adapter = MockAdapter(1, '192.168.1.1', {})
             mock_get_adapter.return_value = mock_adapter
             
             manager = MonitoringManager(mock_db)
+            iface = Mock(spec=DeviceInterface)
+            iface.id = 1
+            iface.name = 'eth0'
+            iface.status = 'up'
+            iface.admin_status = 'up'
+            iface.last_polled = None
+            iface.rx_bytes = None
+            iface.tx_bytes = None
+            iface.speed_bps = 1000000000
+            # Device -> cred -> per-interface queries all resolve sensibly
+            mock_db.query.return_value.filter.return_value.first.side_effect = (
+                [mock_device, cred] + [iface] * 4
+            )
             result = await manager.monitor_device(1)
-            
-            assert result['success'] is True
+
+            assert result['success'] is True, result
             assert result['device_id'] == 1
     
     @pytest.mark.asyncio
@@ -156,8 +181,10 @@ class TestMonitoringManager:
         expected_rx_bps = 800000
         expected_tx_bps = 400000
         
-        assert added_metric.rx_bps == expected_rx_bps
-        assert added_metric.tx_bps == expected_tx_bps
+        # Allow small tolerance: the manager uses two separate utcnow() calls,
+        # so elapsed time is slightly > 10s (int truncation).
+        assert abs(added_metric.rx_bps - expected_rx_bps) <= expected_rx_bps * 0.02
+        assert abs(added_metric.tx_bps - expected_tx_bps) <= expected_tx_bps * 0.02
     
     @pytest.mark.asyncio
     async def test_counter_reset_handling(self, mock_db):
@@ -190,9 +217,14 @@ class TestMonitoringManager:
         # Get the InterfaceMetric that was added
         added_metric = mock_db.add.call_args[0][0]
         
-        # Should be 0 due to counter reset
-        assert added_metric.rx_bps == 0
-        assert added_metric.tx_bps == 0
+        # Counter reset: rates are marked UNAVAILABLE (None), never fabricated
+        # as 0 or negative values. Raw counters are still stored.
+        assert added_metric.rx_bps is None
+        assert added_metric.tx_bps is None
+        assert added_metric.utilization_in is None
+        assert added_metric.utilization_out is None
+        assert added_metric.rx_bytes == 1000000
+        assert added_metric.tx_bytes == 500000
 
 
 class TestMonitoringScheduler:
