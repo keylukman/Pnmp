@@ -3,8 +3,8 @@ Monitoring Scheduler
 Runs periodic device monitoring tasks
 """
 import asyncio
-from datetime import datetime
-from typing import List, Dict, Any
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from .manager import MonitoringManager
 from ..models import Device, DeviceCredential, DeviceStatus
@@ -26,11 +26,16 @@ class MonitoringScheduler:
         self.task = None
         self.interval = (interval if interval is not None
                          else settings.MONITORING_INTERVAL_SECONDS)
-        self.concurrency_limit = asyncio.Semaphore(settings.MONITORING_MAX_CONCURRENCY)
-        
+        # NOTE: the Semaphore must NOT be created in __init__. In Python 3.10+
+        # an asyncio primitive binds to the event loop on first use; creating
+        # it outside a running loop (e.g. at app startup / lifespan) and later
+        # awaiting it inside uvicorn's loop raises "attached to a different
+        # loop". Create lazily inside the running loop instead.
+        self._semaphore: Optional[asyncio.Semaphore] = None
+
         # Per-device last poll time (respects each device's polling interval)
         self.last_device_poll: Dict[int, datetime] = {}
-        
+
         # Monitoring statistics
         self.stats = {
             'total_polls': 0,
@@ -39,6 +44,20 @@ class MonitoringScheduler:
             'last_poll': None,
             'active_polls': 0
         }
+
+    @property
+    def concurrency_limit(self) -> asyncio.Semaphore:
+        """Lazily-created semaphore bound to the current running loop.
+
+        Python 3.10+ deprecation: an asyncio primitive created outside a
+        running event loop binds to whichever loop first runs it; creating
+        one at import/startup time and awaiting it inside uvicorn's loop can
+        raise 'attached to a different loop'. Creating it lazily *inside* the
+        running loop avoids that entirely.
+        """
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(settings.MONITORING_MAX_CONCURRENCY)
+        return self._semaphore
     
     async def start(self):
         """Start the monitoring scheduler (idempotent - no duplicate loops)"""
@@ -82,10 +101,20 @@ class MonitoringScheduler:
         return self.interval
     
     def _is_due(self, device: Device, now: datetime) -> bool:
-        """Whether this device is due for polling based on its own interval"""
-        last = self.last_device_poll.get(device.id)
+        """Whether this device is due for polling based on its own interval.
+
+        Uses the persisted ``Device.last_seen`` timestamp when available (it is
+        updated on every successful poll and survives scheduler restarts),
+        falling back to the in-process map, so a restarted scheduler does not
+        immediately re-poll every device.
+        """
+        last = getattr(device, 'last_seen', None)
         if last is None:
-            return True
+            last = self.last_device_poll.get(device.id)
+        if last is None:
+            return True  # never polled — poll now to establish a baseline
+        if last.tzinfo is not None:
+            last = last.astimezone(timezone.utc).replace(tzinfo=None)
         return (now - last).total_seconds() >= self._device_interval_seconds(device)
     
     async def _poll_all_devices(self):
