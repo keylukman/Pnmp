@@ -2,12 +2,17 @@
 Aruba AOS-CX REST API Adapter
 """
 import asyncio
+import logging
 import time
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import httpx
+from app.core.config import settings
 from .base import NetworkDeviceAdapter
 
+
+
+logger = logging.getLogger(__name__)
 
 class ArubaCXAdapter(NetworkDeviceAdapter):
     """
@@ -21,6 +26,23 @@ class ArubaCXAdapter(NetworkDeviceAdapter):
         self.password = credentials.get('password', '')
         self.timeout = credentials.get('timeout', 10)
         self.base_url = f"https://{management_ip}/rest/v1"
+        # PHASE 3 STEP 8 (TLS hardening): certificate verification is ON by default.
+        # Verification may only be disabled explicitly per credential (tls_verify=false)
+        # or globally (ARUBA_TLS_VERIFY=false) — never silently. Prefer pointing
+        # ARUBA_CA_CERT_FILE (or credential 'ca_certificate') at the device/lab CA.
+        cred_verify = self.credentials.get('tls_verify', None)
+        ca_file = self.credentials.get('ca_certificate') or settings.ARUBA_CA_CERT_FILE
+        if ca_file:
+            self._tls_verify = ca_file
+        elif cred_verify is not None:
+            self._tls_verify = bool(cred_verify)
+        else:
+            self._tls_verify = settings.ARUBA_TLS_VERIFY
+        if self._tls_verify is False:
+            logger.warning(
+                "ArubaCXAdapter device %s: TLS certificate verification DISABLED via explicit "
+                "configuration. Configure a CA bundle for production use.", self.device_id
+            )
         self._client = None
         self._session_cookie = None
     
@@ -28,7 +50,7 @@ class ArubaCXAdapter(NetworkDeviceAdapter):
         """Get or create HTTP client"""
         if self._client is None:
             self._client = httpx.AsyncClient(
-                verify=False,  # Self-signed certs
+                verify=self._tls_verify,
                 timeout=self.timeout
             )
         return self._client
@@ -174,6 +196,10 @@ class ArubaCXAdapter(NetworkDeviceAdapter):
                     'status': 'up' if iface_data.get('admin_state', 'up') == 'up' else 'down',
                     'speed_bps': iface_data.get('interface_statistics', {}).get('cur_rate', {}).get('speed', 0) * 1_000_000,
                     'mtu': iface_data.get('user_config', {}).get('mtu', None),
+                    # AOS-CX REST exposes ifIndex under 'id'/'if_index' depending on version.
+                    # The manager matches primarily by name (stable across reboots for CX ports);
+                    # if_index is stored when available as a secondary key.
+                    'if_index': iface_data.get('id') or iface_data.get('if_index'),
                     'duplex': 'full'  # Aruba CX is always full duplex
                 })
             
