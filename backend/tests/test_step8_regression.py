@@ -117,20 +117,21 @@ class TestSchedulerLifecycle:
         make_device(db_session, "10.0.0.3", enabled=True,
                     status=DeviceStatus.MAINTENANCE)                 # maintenance
         # scheduler only polls devices that have a credential row configured
-        db_session.add(DeviceCredential(device_id=d_on.id, snmp_version='v2c',
+        db_session.add(DeviceCredential(device_id=d_on.id,
+                                        snmp_version='v2c',
                                         snmp_community_encrypted='x'))
         db_session.commit()
         factory = lambda: db_session
         sched = MonitoringScheduler(factory)
         called = []
 
-        async def fake_poll(device_id):
+        async def fake_poll(mgr, device_id):
             called.append(device_id)
             return {'success': True}
 
-        with patch.object(sched, '_poll_device_with_semaphore', side_effect=lambda m, did: fake_poll(did)):
+        with patch.object(sched, '_poll_device_with_semaphore', side_effect=fake_poll):
             await sched._poll_all_devices()
-        assert called == [d_on.id]   # only the enabled, non-maintenance device
+        assert called == [d_on.id]   # only the enabled, non-maintenance, credentialed device
 
     async def test_per_device_interval_respected(self, db_session):
         d = make_device(db_session, "10.0.0.10", enabled=True, interval=3600)
@@ -138,11 +139,19 @@ class TestSchedulerLifecycle:
         assert sched._device_interval_seconds(d) == 3600
         d.polling_interval_seconds = None
         assert sched._device_interval_seconds(d) == sched.interval
-        now = datetime.utcnow()
-        sched.last_device_poll[d.id] = now - timedelta(seconds=60)
-        assert sched._is_due(d, now) is False       # 60s < 3600s override
-        sched.last_device_poll[d.id] = now - timedelta(seconds=3700)
+        # Deterministic clock: controlled timestamps only, no wall-clock sleeps.
+        # last_polled=None means never polled -> due immediately (baseline poll).
+        now = datetime(2026, 10, 12, 12, 0, 0)
         assert sched._is_due(d, now) is True
+        d.polling_interval_seconds = 3600
+        d.last_polled = now - timedelta(seconds=60)
+        assert sched._is_due(d, now) is False      # 60s < 3600s override
+        d.last_polled = now - timedelta(seconds=3700)
+        assert sched._is_due(d, now) is True       # interval elapsed
+        # in-process map fallback when last_polled is NULL
+        d.last_polled = None
+        sched.last_device_poll[d.id] = now - timedelta(seconds=60)
+        assert sched._is_due(d, now) is False
 
     async def test_credential_prefilter(self, db_session):
         d = make_device(db_session, "10.0.0.11", enabled=True)      # no credentials row
@@ -156,6 +165,144 @@ class TestSchedulerLifecycle:
         result = await mgr.monitor_device(d.id)
         assert result['success'] is False
         assert result['error_code'] == 'NO_CREDENTIALS'
+
+
+class TestFirstPollSemantics:
+    """Step 8.3 deterministic first-poll / second-poll / reset semantics."""
+
+    async def _poll(self, db, device_id, adapter):
+        with patch('app.monitoring.manager.AdapterRegistry.get_adapter', return_value=adapter):
+            mgr = MonitoringManager(db)
+            res = await mgr.monitor_device(device_id)
+        assert res['success'] is True, res
+        return mgr
+
+    def _setup(self, db_session):
+        d = make_device(db_session, "10.0.0.40", enabled=True)
+        from app.core.encryption import credential_encryption
+        enc = credential_encryption.encrypt("unit-test-community")
+        db_session.add(DeviceCredential(device_id=d.id, snmp_version='v2c',
+                                        snmp_community_encrypted=enc))
+        db_session.commit()
+        return d
+
+    async def test_first_poll_null_rates_survive_flush_and_reload(self, db_session):
+        d = self._setup(db_session)
+        await self._poll(db_session, d.id, FakeAdapter(ok=True))
+        im = db_session.query(InterfaceMetric).first()
+        # ORM values before any further flush
+        assert im.rx_bps is None and im.tx_bps is None
+        assert im.utilization_in is None and im.utilization_out is None
+        assert im.rx_bytes == 1000 and im.tx_bytes == 500  # raw counters persisted
+        # Persisted values after full reload (proves no DB-side default fabricates 0)
+        db_session.expire_all()
+        im2 = db_session.query(InterfaceMetric).one()
+        assert im2.rx_bps is None and im2.tx_bps is None
+        iface = db_session.query(DeviceInterface).one()
+        assert iface.last_polled is not None
+        assert iface.rx_bytes == 1000
+
+    async def test_second_poll_positive_delta_formula(self, db_session):
+        d = self._setup(db_session)
+        await self._poll(db_session, d.id, FakeAdapter(ok=True))
+        iface = db_session.query(DeviceInterface).one()
+        # Deterministic clock: shift the baseline back exactly 60 s — no sleeps.
+        iface.last_polled = datetime.utcnow() - timedelta(seconds=60)
+        db_session.commit()
+
+        class Adapter2(FakeAdapter):
+            async def get_interface_statistics(self):
+                return [{'if_index': 1, 'name': 'eth1',
+                         'rx_bytes': 1_600_000, 'tx_bytes': 800_000,
+                         'rx_errors': 0, 'tx_errors': 0}]
+        await self._poll(db_session, d.id, Adapter2())
+        metrics = db_session.query(InterfaceMetric).order_by(InterfaceMetric.id).all()
+        assert len(metrics) == 2
+        m = metrics[-1]
+        # bps = (current - previous) * 8 / elapsed ; allow +-1% for sub-second jitter
+        expected_rx = int((1_600_000 - 1000) * 8 / 60)
+        expected_tx = int((800_000 - 500) * 8 / 60)
+        assert abs(m.rx_bps - expected_rx) <= expected_rx * 0.02
+        assert abs(m.tx_bps - expected_tx) <= expected_tx * 0.02
+        assert m.utilization_in is not None and m.utilization_in <= 100
+
+    async def test_counter_reset_yields_null_rates(self, db_session):
+        d = self._setup(db_session)
+        await self._poll(db_session, d.id, FakeAdapter(ok=True))
+        iface = db_session.query(DeviceInterface).one()
+        iface.last_polled = datetime.utcnow() - timedelta(seconds=60)
+        db_session.commit()
+
+        class Reset(FakeAdapter):
+            async def get_interface_statistics(self):
+                return [{'if_index': 1, 'name': 'eth1',
+                         'rx_bytes': 10, 'tx_bytes': 5,   # counter went backwards
+                         'rx_errors': 0, 'tx_errors': 0}]
+        await self._poll(db_session, d.id, Reset())
+        m = db_session.query(InterfaceMetric).order_by(InterfaceMetric.id.desc()).first()
+        assert m.rx_bps is None and m.tx_bps is None          # never negative/zero-fabricated
+        assert m.rx_bytes == 10                                 # new baseline stored
+        assert m.utilization_in is None and m.utilization_out is None
+
+    async def test_missing_counters_not_fabricated(self, db_session):
+        d = self._setup(db_session)
+        await self._poll(db_session, d.id, FakeAdapter(ok=True))
+        iface = db_session.query(DeviceInterface).one()
+        iface.last_polled = datetime.utcnow() - timedelta(seconds=60)
+        db_session.commit()
+
+        class Missing(FakeAdapter):
+            async def get_interface_statistics(self):
+                return [{'if_index': 1, 'name': 'eth1'}]      # no counters at all
+        await self._poll(db_session, d.id, Missing())
+        m = db_session.query(InterfaceMetric).order_by(InterfaceMetric.id.desc()).first()
+        assert m.rx_bytes is None and m.tx_bytes is None
+        assert m.rx_bps is None and m.tx_bps is None
+
+    async def test_genuine_zero_counter_is_valid_baseline(self, db_session):
+        """A real device-reported 0 must persist as 0 (not NULL) and produce a
+        positive delta on the next poll — proves we did not over-correct by
+        treating 0 as 'no data'."""
+        d = self._setup(db_session)
+
+        class Zero(FakeAdapter):
+            async def get_interface_statistics(self):
+                return [{'if_index': 1, 'name': 'eth1', 'rx_bytes': 0, 'tx_bytes': 0,
+                         'rx_errors': 0, 'tx_errors': 0}]
+        await self._poll(db_session, d.id, Zero())
+        db_session.expire_all()
+        iface = db_session.query(DeviceInterface).one()
+        assert iface.rx_bytes == 0 and iface.tx_bytes == 0     # genuine zero preserved
+        m1 = db_session.query(InterfaceMetric).one()
+        assert m1.rx_bps is None                                # first poll: no baseline yet
+        iface.last_polled = datetime.utcnow() - timedelta(seconds=60)
+        db_session.commit()
+
+        class Rising(FakeAdapter):
+            async def get_interface_statistics(self):
+                return [{'if_index': 1, 'name': 'eth1', 'rx_bytes': 6000, 'tx_bytes': 3000,
+                         'rx_errors': 0, 'tx_errors': 0}]
+        await self._poll(db_session, d.id, Rising())
+        m2 = db_session.query(InterfaceMetric).order_by(InterfaceMetric.id.desc()).first()
+        assert m2.rx_bps is not None and m2.rx_bps > 0          # 0 WAS a valid baseline
+        assert abs(m2.rx_bps - int(6000 * 8 / 60)) <= 200
+
+    async def test_unknown_speed_yields_null_utilization(self, db_session):
+        d = self._setup(db_session)
+        await self._poll(db_session, d.id, FakeAdapter(ok=True))
+        iface = db_session.query(DeviceInterface).one()
+        iface.speed_bps = None                                  # speed unknown
+        iface.last_polled = datetime.utcnow() - timedelta(seconds=60)
+        db_session.commit()
+
+        class Up(FakeAdapter):
+            async def get_interface_statistics(self):
+                return [{'if_index': 1, 'name': 'eth1', 'rx_bytes': 2000, 'tx_bytes': 1000,
+                         'rx_errors': 0, 'tx_errors': 0}]
+        await self._poll(db_session, d.id, Up())
+        m = db_session.query(InterfaceMetric).order_by(InterfaceMetric.id.desc()).first()
+        assert m.rx_bps is not None                             # rate still computable
+        assert m.utilization_in is None and m.utilization_out is None  # but utilization is NOT
 
 
 # ----------------------------------------------------------------------------- status/alerts
@@ -262,12 +409,12 @@ class TestMonitoringStatusAPI:
         client = TestClient(app)
 
         # No scheduler -> honest 503 (must not falsely report running)
-        with patch('app.monitoring.get_scheduler', return_value=None):
+        with patch('app.api.v1.monitoring.get_scheduler', return_value=None):
             r = client.get("/api/v1/monitoring/status")
             assert r.status_code == 503
 
         sched = MonitoringScheduler(lambda: db_session)
-        with patch('app.monitoring.get_scheduler', return_value=sched):
+        with patch('app.api.v1.monitoring.get_scheduler', return_value=sched):
             await sched.start()
             r = client.get("/api/v1/monitoring/status")
             assert r.status_code == 200

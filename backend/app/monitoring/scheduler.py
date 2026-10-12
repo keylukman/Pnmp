@@ -103,19 +103,23 @@ class MonitoringScheduler:
     def _is_due(self, device: Device, now: datetime) -> bool:
         """Whether this device is due for polling based on its own interval.
 
-        Uses the persisted ``Device.last_seen`` timestamp when available (it is
-        updated on every successful poll and survives scheduler restarts),
-        falling back to the in-process map, so a restarted scheduler does not
-        immediately re-poll every device.
+        Uses the persisted ``Device.last_polled`` timestamp when available
+        (updated by the monitoring manager on each completed poll and survives
+        scheduler restarts), falling back to the in-process map, so a restarted
+        scheduler does not immediately re-poll every device.
         """
-        last = getattr(device, 'last_seen', None)
+        last = getattr(device, 'last_polled', None)
         if last is None:
             last = self.last_device_poll.get(device.id)
         if last is None:
             return True  # never polled — poll now to establish a baseline
+        # Normalize both sides to naive UTC so arithmetic works whether the
+        # driver returned tz-aware (PostgreSQL) or naive (SQLite) datetimes.
         if last.tzinfo is not None:
             last = last.astimezone(timezone.utc).replace(tzinfo=None)
-        return (now - last).total_seconds() >= self._device_interval_seconds(device)
+        now_naive = now.astimezone(timezone.utc).replace(tzinfo=None) \
+            if isinstance(now, datetime) and now.tzinfo is not None else now
+        return (now_naive - last).total_seconds() >= self._device_interval_seconds(device)
     
     async def _poll_all_devices(self):
         """Poll all enabled devices that are due, with concurrency control"""
@@ -131,8 +135,9 @@ class MonitoringScheduler:
                 logger.debug("No devices to monitor")
                 return
             
-            # Filter by per-device polling interval
-            now = datetime.utcnow()
+            # Filter by per-device polling interval (tz-aware clock; _is_due
+            # normalizes persisted timestamps to match)
+            now = datetime.now(timezone.utc)
             due_devices = [d for d in devices if self._is_due(d, now)]
             if not due_devices:
                 logger.debug("No devices due for polling this cycle")
@@ -141,7 +146,11 @@ class MonitoringScheduler:
             # Poll only devices that have credentials configured.
             # (Devices without credentials are skipped so they do not get
             # spuriously marked DOWN/WARNING by unreachable-SNMP failures.)
-            cred_ids = {c.device_id for c in db.query(DeviceCredential.device_id).all()}
+            # NOTE: ``c`` rows are Row objects — the attribute is ``device_id``,
+            # NOT the table class attribute ``DeviceCredential.device_id``
+            # (a Column object, unhashable and never equal to an int id).
+            cred_ids = {c.device_id for c in db.query(
+                DeviceCredential.device_id).all()}
             ready = [d for d in due_devices if d.id in cred_ids]
             for d in due_devices:
                 if d.id not in cred_ids:

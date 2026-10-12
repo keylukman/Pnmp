@@ -334,10 +334,10 @@ class MonitoringManager:
             util_out = None
 
             # A usable baseline requires a previous sample timestamp AND
-            # strictly-positive previous counters. Columns default to 0 for
-            # rows that were never polled; 0 is indistinguishable from a real
-            # "no traffic" counter, so it must NOT be treated as a baseline
-            # (otherwise the first delta would be computed against a fake zero).
+            # previously stored raw counters. NULL now means "never polled /
+            # unsupported" (Step 8.3: column defaults removed so NULL survives
+            # persistence) — a genuine device-reported zero IS a valid
+            # baseline value and must produce positive deltas next poll.
             have_baseline = (
                 iface.last_polled is not None
                 and iface.rx_bytes is not None and iface.rx_bytes > 0
