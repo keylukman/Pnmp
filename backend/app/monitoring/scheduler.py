@@ -20,11 +20,12 @@ class MonitoringScheduler:
     Runs polling tasks at configured intervals with concurrency control.
     """
     
-    def __init__(self, db_session_factory):
+    def __init__(self, db_session_factory, interval: int = None):
         self.db_session_factory = db_session_factory
         self.running = False
         self.task = None
-        self.interval = settings.MONITORING_INTERVAL_SECONDS
+        self.interval = (interval if interval is not None
+                         else settings.MONITORING_INTERVAL_SECONDS)
         self.concurrency_limit = asyncio.Semaphore(settings.MONITORING_MAX_CONCURRENCY)
         
         # Per-device last poll time (respects each device's polling interval)

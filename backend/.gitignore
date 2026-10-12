@@ -41,3 +41,8 @@ coverage.xml
 
 # Alembic
 alembic/versions/*.pyc
+
+# Encryption material (never commit)
+.dev_encryption.key
+backend/.dev_encryption.key
+.env

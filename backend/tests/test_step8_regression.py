@@ -116,6 +116,10 @@ class TestSchedulerLifecycle:
         make_device(db_session, "10.0.0.2", enabled=False)          # disabled
         make_device(db_session, "10.0.0.3", enabled=True,
                     status=DeviceStatus.MAINTENANCE)                 # maintenance
+        # scheduler only polls devices that have a credential row configured
+        db_session.add(DeviceCredential(device_id=d_on.id, snmp_version='v2c',
+                                        snmp_community_encrypted='x'))
+        db_session.commit()
         factory = lambda: db_session
         sched = MonitoringScheduler(factory)
         called = []
@@ -130,7 +134,7 @@ class TestSchedulerLifecycle:
 
     async def test_per_device_interval_respected(self, db_session):
         d = make_device(db_session, "10.0.0.10", enabled=True, interval=3600)
-        sched = MonitoringScheduler(lambda: db_session)
+        sched = MonitoringScheduler(lambda: db_session, interval=60)
         assert sched._device_interval_seconds(d) == 3600
         d.polling_interval_seconds = None
         assert sched._device_interval_seconds(d) == sched.interval
@@ -202,14 +206,18 @@ class TestStatusAndAlerts:
 class TestPersistence:
     async def test_successful_poll_persists_metrics(self, db_session):
         d = make_device(db_session, "10.0.0.30", enabled=True)
+        # store the community under a REAL encrypted token so decryption
+        # succeeds and the poll proceeds with a properly configured credential
+        from app.core.encryption import credential_encryption
+        enc = credential_encryption.encrypt("unit-test-community")
         cred = DeviceCredential(device_id=d.id, snmp_version='v2c',
-                                snmp_community_encrypted='enc-test')
+                                snmp_community_encrypted=enc)
         db_session.add(cred); db_session.commit()
         with patch('app.monitoring.manager.AdapterRegistry.get_adapter',
                    return_value=FakeAdapter(ok=True)):
             mgr = MonitoringManager(db_session)
             res = await mgr.monitor_device(d.id)
-        assert res['success'] is True
+        assert res['success'] is True, res
         assert db_session.query(DeviceMetric).filter(
             DeviceMetric.device_id == d.id).count() == 1
         iface = db_session.query(DeviceInterface).filter(
@@ -245,7 +253,7 @@ class TestMonitoringStatusAPI:
         from app.core.deps import get_current_user
 
         app = FastAPI()
-        app.include_router(monitoring_api.router, prefix="/api/v1/monitoring")
+        app.include_router(monitoring_api.router, prefix="/api/v1")
         user = User(username="admin", email="a@b.c", hashed_password="x",
                     full_name="Admin", role=UserRole.ADMIN, is_active=True)
         db_session.add(user); db_session.commit()
@@ -329,7 +337,6 @@ class TestSecurity:
         assert _is_valid_host("") is False
         assert _is_valid_host("10.0.0.1 && calc.exe") is False
 
-    @pytest.mark.asyncio
     async def test_ping_async_is_nonblocking_and_timeout_bounded(self):
         from app.api.v1.devices import _ping_async
         calls = {}
