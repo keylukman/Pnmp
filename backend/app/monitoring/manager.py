@@ -340,8 +340,8 @@ class MonitoringManager:
             # baseline value and must produce positive deltas next poll.
             have_baseline = (
                 iface.last_polled is not None
-                and iface.rx_bytes is not None
-                and iface.tx_bytes is not None
+                and iface.rx_bytes is not None and iface.rx_bytes > 0
+                and iface.tx_bytes is not None and iface.tx_bytes > 0
                 and current_rx_bytes is not None
                 and current_tx_bytes is not None
             )
