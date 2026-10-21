@@ -2,7 +2,7 @@
 PNMP Database Models
 SQLAlchemy ORM models for all entities
 """
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Enum as SQLEnum, text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Enum as SQLEnum, text, BigInteger
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -200,21 +200,21 @@ class DeviceInterface(Base):
     mtu = Column(Integer, nullable=True)
     
     # Current counters
-    rx_bytes = Column(Integer, default=0)  # 64-bit counter
-    tx_bytes = Column(Integer, default=0)  # 64-bit counter
-    rx_errors = Column(Integer, default=0)
-    tx_errors = Column(Integer, default=0)
-    rx_discards = Column(Integer, default=0)
-    tx_discards = Column(Integer, default=0)
+    rx_bytes = Column(BigInteger, nullable=True)  # 64-bit counter
+    tx_bytes = Column(BigInteger, nullable=True)  # 64-bit counter
+    rx_errors = Column(BigInteger, nullable=True)
+    tx_errors = Column(BigInteger, nullable=True)
+    rx_discards = Column(BigInteger, nullable=True)
+    tx_discards = Column(BigInteger, nullable=True)
     
     # Calculated rates (bits per second)
-    rx_bps = Column(Integer, default=0)
-    tx_bps = Column(Integer, default=0)
+    rx_bps = Column(Integer, nullable=True)
+    tx_bps = Column(Integer, nullable=True)
     
     # Utilization percentage
-    utilization = Column(Integer, default=0)  # max of in/out
-    utilization_in = Column(Integer, default=0)
-    utilization_out = Column(Integer, default=0)
+    utilization = Column(Integer, nullable=True)  # max of in/out
+    utilization_in = Column(Integer, nullable=True)
+    utilization_out = Column(Integer, nullable=True)
     
     last_polled = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -352,19 +352,19 @@ class InterfaceMetric(Base):
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     
     # Traffic counters (absolute values)
-    rx_bytes = Column(Integer, default=0)
-    tx_bytes = Column(Integer, default=0)
-    rx_errors = Column(Integer, default=0)
-    tx_errors = Column(Integer, default=0)
-    rx_discards = Column(Integer, default=0)
-    tx_discards = Column(Integer, default=0)
+    rx_bytes = Column(BigInteger, nullable=True)
+    tx_bytes = Column(BigInteger, nullable=True)
+    rx_errors = Column(BigInteger, nullable=True)
+    tx_errors = Column(BigInteger, nullable=True)
+    rx_discards = Column(BigInteger, nullable=True)
+    tx_discards = Column(BigInteger, nullable=True)
     
     # Calculated rates (bits per second)
-    rx_bps = Column(Integer, default=0)
-    tx_bps = Column(Integer, default=0)
+    rx_bps = Column(Integer, nullable=True)
+    tx_bps = Column(Integer, nullable=True)
     
     # Utilization percentage
-    utilization_in = Column(Integer, default=0)
-    utilization_out = Column(Integer, default=0)
+    utilization_in = Column(Integer, nullable=True)
+    utilization_out = Column(Integer, nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())

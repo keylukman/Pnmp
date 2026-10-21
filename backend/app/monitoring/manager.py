@@ -33,8 +33,16 @@ class MonitoringManager:
     
     def __init__(self, db: Session):
         self.db = db
-        self.concurrency_limit = asyncio.Semaphore(settings.MONITORING_MAX_CONCURRENCY)
+        # Semaphore created lazily inside the running event loop (see
+        # MonitoringScheduler.concurrency_limit for the rationale).
+        self._semaphore: Optional[asyncio.Semaphore] = None
         self.failure_threshold = settings.MONITOR_FAILURE_THRESHOLD
+
+    @property
+    def concurrency_limit(self) -> asyncio.Semaphore:
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(settings.MONITORING_MAX_CONCURRENCY)
+        return self._semaphore
     
     async def monitor_device(self, device_id: int) -> Dict[str, Any]:
         """
@@ -231,8 +239,14 @@ class MonitoringManager:
         self.db.commit()
     
     async def _update_interfaces(self, device_id: int, interfaces: List[Dict[str, Any]]):
-        """Update or create device interfaces with status change detection"""
-        device = self.db.query(Device).filter(Device.id == device_id).first()
+        """Update or create device interfaces with status change detection.
+
+        NOTE: this method must NOT touch ``last_polled`` or the raw counters —
+        those fields form the delta baseline consumed by
+        :meth:`_store_interface_metrics` within the same polling cycle.
+        Updating them here would let a brand-new counter value become its own
+        baseline (fabricating a zero-delta rate on the first poll).
+        """
         
         for iface_data in interfaces:
             # Check if interface exists
@@ -246,14 +260,16 @@ class MonitoringManager:
                 old_status = existing.status
                 new_status = iface_data.get('status', existing.status)
                 
-                # Update existing interface
+                # Update existing interface (metadata only — see docstring).
+                # ``or`` semantics: an adapter that reports no speed (None or
+                # 0) must NOT overwrite a known speed, and must not fabricate
+                # one where the DB holds NULL.
                 existing.description = iface_data.get('description', existing.description)
                 existing.alias = iface_data.get('alias', existing.alias)
                 existing.status = new_status
                 existing.admin_status = iface_data.get('admin_status', existing.admin_status)
-                existing.speed_bps = iface_data.get('speed_bps', existing.speed_bps)
+                existing.speed_bps = iface_data.get('speed_bps') or existing.speed_bps
                 existing.mtu = iface_data.get('mtu', existing.mtu)
-                existing.last_polled = datetime.utcnow()
                 
                 # Generate events for status changes
                 if old_status != new_status:
@@ -276,7 +292,8 @@ class MonitoringManager:
                             source='monitoring'
                         )
             else:
-                # Create new interface
+                # Create new interface. No baseline yet: counters and
+                # last_polled stay NULL until _store_interface_metrics runs.
                 new_iface = DeviceInterface(
                     device_id=device_id,
                     if_index=iface_data.get('if_index'),
@@ -286,8 +303,7 @@ class MonitoringManager:
                     status=iface_data.get('status', 'unknown'),
                     admin_status=iface_data.get('admin_status', 'unknown'),
                     speed_bps=iface_data.get('speed_bps'),
-                    mtu=iface_data.get('mtu'),
-                    last_polled=datetime.utcnow()
+                    mtu=iface_data.get('mtu')
                 )
                 self.db.add(new_iface)
         
@@ -320,6 +336,11 @@ class MonitoringManager:
             util_in = None
             util_out = None
 
+            # A usable baseline requires a previous sample timestamp AND
+            # previously stored raw counters. NULL now means "never polled /
+            # unsupported" (Step 8.3: column defaults removed so NULL survives
+            # persistence) — a genuine device-reported zero IS a valid
+            # baseline value and must produce positive deltas next poll.
             have_baseline = (
                 iface.last_polled is not None
                 and iface.rx_bytes is not None

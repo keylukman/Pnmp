@@ -3,8 +3,8 @@ Monitoring Scheduler
 Runs periodic device monitoring tasks
 """
 import asyncio
-from datetime import datetime
-from typing import List, Dict, Any
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from .manager import MonitoringManager
 from ..models import Device, DeviceCredential, DeviceStatus
@@ -26,11 +26,16 @@ class MonitoringScheduler:
         self.task = None
         self.interval = (interval if interval is not None
                          else settings.MONITORING_INTERVAL_SECONDS)
-        self.concurrency_limit = asyncio.Semaphore(settings.MONITORING_MAX_CONCURRENCY)
-        
+        # NOTE: the Semaphore must NOT be created in __init__. In Python 3.10+
+        # an asyncio primitive binds to the event loop on first use; creating
+        # it outside a running loop (e.g. at app startup / lifespan) and later
+        # awaiting it inside uvicorn's loop raises "attached to a different
+        # loop". Create lazily inside the running loop instead.
+        self._semaphore: Optional[asyncio.Semaphore] = None
+
         # Per-device last poll time (respects each device's polling interval)
         self.last_device_poll: Dict[int, datetime] = {}
-        
+
         # Monitoring statistics
         self.stats = {
             'total_polls': 0,
@@ -39,6 +44,20 @@ class MonitoringScheduler:
             'last_poll': None,
             'active_polls': 0
         }
+
+    @property
+    def concurrency_limit(self) -> asyncio.Semaphore:
+        """Lazily-created semaphore bound to the current running loop.
+
+        Python 3.10+ deprecation: an asyncio primitive created outside a
+        running event loop binds to whichever loop first runs it; creating
+        one at import/startup time and awaiting it inside uvicorn's loop can
+        raise 'attached to a different loop'. Creating it lazily *inside* the
+        running loop avoids that entirely.
+        """
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(settings.MONITORING_MAX_CONCURRENCY)
+        return self._semaphore
     
     async def start(self):
         """Start the monitoring scheduler (idempotent - no duplicate loops)"""
@@ -82,11 +101,25 @@ class MonitoringScheduler:
         return self.interval
     
     def _is_due(self, device: Device, now: datetime) -> bool:
-        """Whether this device is due for polling based on its own interval"""
-        last = self.last_device_poll.get(device.id)
+        """Whether this device is due for polling based on its own interval.
+
+        Uses the persisted ``Device.last_polled`` timestamp when available
+        (updated by the monitoring manager on each completed poll and survives
+        scheduler restarts), falling back to the in-process map, so a restarted
+        scheduler does not immediately re-poll every device.
+        """
+        last = getattr(device, 'last_polled', None)
         if last is None:
-            return True
-        return (now - last).total_seconds() >= self._device_interval_seconds(device)
+            last = self.last_device_poll.get(device.id)
+        if last is None:
+            return True  # never polled — poll now to establish a baseline
+        # Normalize both sides to naive UTC so arithmetic works whether the
+        # driver returned tz-aware (PostgreSQL) or naive (SQLite) datetimes.
+        if last.tzinfo is not None:
+            last = last.astimezone(timezone.utc).replace(tzinfo=None)
+        now_naive = now.astimezone(timezone.utc).replace(tzinfo=None) \
+            if isinstance(now, datetime) and now.tzinfo is not None else now
+        return (now_naive - last).total_seconds() >= self._device_interval_seconds(device)
     
     async def _poll_all_devices(self):
         """Poll all enabled devices that are due, with concurrency control"""
@@ -102,8 +135,9 @@ class MonitoringScheduler:
                 logger.debug("No devices to monitor")
                 return
             
-            # Filter by per-device polling interval
-            now = datetime.utcnow()
+            # Filter by per-device polling interval (tz-aware clock; _is_due
+            # normalizes persisted timestamps to match)
+            now = datetime.now(timezone.utc)
             due_devices = [d for d in devices if self._is_due(d, now)]
             if not due_devices:
                 logger.debug("No devices due for polling this cycle")
@@ -112,7 +146,11 @@ class MonitoringScheduler:
             # Poll only devices that have credentials configured.
             # (Devices without credentials are skipped so they do not get
             # spuriously marked DOWN/WARNING by unreachable-SNMP failures.)
-            cred_ids = {c.device_id for c in db.query(DeviceCredential.device_id).all()}
+            # NOTE: ``c`` rows are Row objects — the attribute is ``device_id``,
+            # NOT the table class attribute ``DeviceCredential.device_id``
+            # (a Column object, unhashable and never equal to an int id).
+            cred_ids = {c.device_id for c in db.query(
+                DeviceCredential.device_id).all()}
             ready = [d for d in due_devices if d.id in cred_ids]
             for d in due_devices:
                 if d.id not in cred_ids:
