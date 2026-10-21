@@ -1,0 +1,394 @@
+"""
+PNMP Milestone 1 — Inventory import/export tests
+
+Covers: valid imports, missing values, malformed IPs, unresolved "ISP"
+addresses, duplicate IPs (in-file and in-DB), repeated names, database
+conflicts, transactional rollback, unauthorized access (RBAC), credential
+redaction, and CSV export from actual records.
+
+All workbooks are generated in-memory; no live devices or production data are
+touched. The workbook used here mirrors the agreed column layout of
+"perangkat network(1).xlsx"; the real file must be validated on the user's
+machine before importing into PostgreSQL.
+"""
+import io
+import json
+
+import pytest
+from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from unittest.mock import patch
+
+from app.core.database import Base
+from app.models import (
+    Device, DeviceCredential, Site, User, UserRole, DeviceRole,
+    DeviceStatus, MonitoringMethod, AuditLog,
+)
+from app.services import inventory_import as inv
+
+
+# ---------------------------------------------------------------- helpers
+
+COLS = ["No", "Nama Perangkat", "Lokasi", "Fungsi", "Kondisi",
+        "Merk", "Type", "Versi OS", "EOL/EOSL", "IP Address"]
+
+
+def make_xlsx(rows, columns=None):
+    """Build an xlsx in memory. rows = list of lists (no header)."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(columns or COLS)
+    for r in rows:
+        ws.append(r)
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+GOOD_ROW = [1, "Switch Core 1 ", "Gedung PSSN", "Core Switch L3", "Baik",
+            "aruba", "CX 6200F 24G", "ACL-CX 10.13", "", "192.168.10.1"]
+
+
+@pytest.fixture()
+def db_engine(tmp_path):
+    """File-backed SQLite shared across the test session and TestClient threads."""
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path/'test.db'}",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture()
+def db_session(db_engine):
+    Session = sessionmaker(bind=db_engine)
+    session = Session()
+    yield session
+    session.close()
+
+
+@pytest.fixture()
+def temp_db(db_engine):
+    """Route the service's/API's own SessionLocal() calls to the test database.
+
+    Also overrides the FastAPI get_db dependency so TestClient request handlers
+    use the same engine (TestClient runs the app in a worker thread).
+    """
+    maker = sessionmaker(bind=db_engine)
+
+    with patch("app.core.database.SessionLocal", maker):
+        yield maker()
+
+
+def _make_session(db_engine):
+    return sessionmaker(bind=db_engine)
+
+
+def _build_client(role: str, db_engine):
+    """FastAPI TestClient whose get_current_user resolves the REAL persisted user."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.v1 import devices as devices_api
+    from app.core.deps import get_current_user
+    from app.core.database import get_db
+
+    maker = sessionmaker(bind=db_engine)
+    s = maker()
+    user = User(username=f"{role}1", email=f"{role}@x.y", hashed_password="x",
+                full_name=role, role=UserRole(role), is_active=True)
+    s.add(user); s.commit(); s.refresh(user); uid = user.id; s.close()
+
+    def _current_user():
+        db = maker()
+        return db.query(User).get(uid)
+
+    app = FastAPI()
+    app.include_router(devices_api.router, prefix="/api/v1")
+    app.dependency_overrides[get_current_user] = _current_user
+
+    def _get_db():
+        db = maker()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_db] = _get_db
+    return TestClient(app), user
+
+
+def row_of(preview, idx=0):
+    return preview.rows[idx]
+
+
+# ---------------------------------------------------------------- unit: validation & mapping
+
+class TestValidation:
+    def test_valid_row_normalized(self, temp_db):
+        pv = inv.parse_workbook(make_xlsx([GOOD_ROW]), "test.xlsx")
+        assert pv.total_rows == 1 and pv.valid_count == 1 and pv.invalid_count == 0
+        r = pv.rows[0]
+        assert r.name == "Switch Core 1"          # whitespace normalized
+        assert r.vendor == "Aruba"                # alias normalized
+        assert r.management_ip == "192.168.10.1"
+        assert r.device_role == DeviceRole.CORE_SWITCH.value
+        assert r.site_name == "Gedung PSSN"
+        # firmware only when the workbook actually provides it
+        assert r.base_payload()["firmware_version"] == "ACL-CX 10.13"
+
+    def test_missing_required_values(self, temp_db):
+        bad = [2, "", "", "", "", "", "", "", "", ""]
+        pv = inv.parse_workbook(make_xlsx([bad]), "t.xlsx")
+        assert pv.invalid_count == 1
+        errs = " | ".join(pv.rows[0].errors)
+        assert "Nama Perangkat" in errs and "Lokasi" in errs
+        assert "Merk" in errs and "IP Address is required" in errs
+
+    def test_malformed_ip_invalid(self, temp_db):
+        r = list(GOOD_ROW); r[9] = "192.168.1300.999"
+        pv = inv.parse_workbook(make_xlsx([r]), "t.xlsx")
+        assert pv.invalid_count == 1
+        assert "not a valid IP address or hostname" in pv.rows[0].errors[0]
+
+    def test_isp_placeholder_flagged_not_fabricated(self, temp_db):
+        """The two 'Cloud Core Router' rows whose IP value is 'ISP' must be
+        reported INVALID/unresolved — never converted into a fake address."""
+        rows = [[1, "Cloud Core Router", "Gateway", "Router ISP 1", "Baik",
+                 "mikrotik", "CCR2004", "", "", "ISP"],
+                [2, "Cloud Core Router", "Gateway", "Router ISP 2", "Baik",
+                 "mikrotik", "CCR2004", "", "", "ISP"]]
+        pv = inv.parse_workbook(make_xlsx(rows), "t.xlsx")
+        assert pv.invalid_count == 2
+        for r in pv.rows:
+            assert r.management_ip is None
+            assert "Unresolved management address 'ISP'" in r.errors[0]
+            # source information preserved for manual review:
+            assert r.ip_raw == "ISP" and r.name == "Cloud Core Router"
+
+    def test_duplicate_ip_in_file_flagged(self, temp_db):
+        r2 = list(GOOD_ROW); r2[0] = 2; r2[1] = "Switch Core 2"
+        dup = list(GOOD_ROW); dup[0] = 3; dup[1] = "Switch Dup"  # same IP
+        pv = inv.parse_workbook(make_xlsx([GOOD_ROW, r2, dup]), "t.xlsx")
+        assert pv.duplicate_in_file_count == 1
+        assert row_of(pv, 2).duplicate_of_row == pv.rows[0].row_no
+        assert any("Duplicate IP in file" in w for w in row_of(pv, 2).warnings)
+
+    def test_repeated_names_allowed_but_reviewed(self, temp_db):
+        a = list(GOOD_ROW); a[0] = 1; a[1] = "Access Point"; a[9] = "10.0.0.1"
+        b = list(GOOD_ROW); b[0] = 2; b[1] = "Access Point"; b[9] = "10.0.0.2"
+        pv = inv.parse_workbook(make_xlsx([a, b]), "t.xlsx")
+        assert pv.invalid_count == 0
+        assert pv.review_needed_count == 2
+        for r in pv.rows:
+            assert any("Repeated device name" in w for w in r.warnings)
+
+    def test_existing_db_ip_conflict_flagged(self, db_session, temp_db):
+        db_session.add(Device(hostname="pre", display_name="Pre-existing",
+                              management_ip="192.168.10.1", vendor="Aruba",
+                              device_type="Switch", device_role=DeviceRole.CORE_SWITCH))
+        db_session.commit()
+        pv = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx")
+        r = pv.rows[0]
+        assert r.db_existing_device_id is not None
+        assert any("already registered" in w for w in r.warnings)
+        assert pv.existing_in_db_count == 1
+
+    def test_missing_column_rejected(self, temp_db):
+        cols = [c for c in COLS if c != "IP Address"]
+        rows = [[c[:9] for c in GOOD_ROW[:9]]]
+        with pytest.raises(ValueError) as e:
+            inv.parse_workbook(make_xlsx(rows, cols), "t.xlsx")
+        assert "IP Address" in str(e.value)
+
+    def test_vendor_and_role_mapping(self, temp_db):
+        rows = [
+            [1, "AP 505", "L1", "Wireless Access Point", "Baik", "aruba", "AP-505", "", "", "10.1.1.1"],
+            [2, "CCR", "GW", "Cloud Core Router ISP", "Baik", "mikrotik", "CCR2004", "", "", "10.1.1.2"],
+            [3, "FG", "DC", "Firewall perimeter", "Baik", "Fortinet", "FortiGate 101F", "", "", "10.1.1.3"],
+            [4, "SW", "L2", "Access switch", "Baik", "Cisco", "Catalyst 2960", "", "", "10.1.1.4"],
+            [5, "BL", "GW", "Load balancer WAN", "Baik", "Peplink", "Balance 710", "", "", "10.1.1.5"],
+        ]
+        pv = inv.parse_workbook(make_xlsx(rows), "t.xlsx")
+        roles = [r.device_role for r in pv.rows]
+        vendors = [r.vendor for r in pv.rows]
+        assert roles == [DeviceRole.ACCESS_POINT.value, DeviceRole.ROUTER.value,
+                         DeviceRole.FIREWALL.value, DeviceRole.ACCESS_SWITCH.value,
+                         DeviceRole.LOAD_BALANCER.value]
+        assert vendors == ["Aruba", "MikroTik", "Fortinet", "Cisco", "Peplink"]
+
+
+# ---------------------------------------------------------------- integration: commit & rollback
+
+class TestTransactionalImport:
+    def test_commit_inserts_with_honest_defaults(self, temp_db, db_session):
+        rows = [GOOD_ROW,
+                [2, "Edge SW", "Gedung Akademik", "Access Switch", "Baik",
+                 "aruba", "CX 6100", "", "", "192.168.10.2"]]
+        pv = inv.parse_workbook(make_xlsx(rows), "t.xlsx")
+        res = inv.commit_import(pv)
+        assert res.inserted == 2
+        d = db_session.query(Device).filter_by(display_name="Switch Core 1").one()
+        # registration is NOT proof of reachability / monitoring:
+        assert d.status == DeviceStatus.UNKNOWN
+        assert d.monitoring_enabled is False
+        assert d.monitoring_method == MonitoringMethod.NONE
+        assert d.is_demo is False
+        # unknown optional fields stay NULL — never fabricated
+        assert d.serial_number is None
+        assert d.last_seen is None
+        # site created inside the same transaction
+        site = db_session.query(Site).filter_by(name="Gedung PSSN").one()
+        assert d.site_id == site.id
+
+    def test_duplicates_skipped_never_merged(self, temp_db, db_session):
+        dup = list(GOOD_ROW); dup[0] = 9; dup[1] = "Copy Cat"   # same IP as GOOD_ROW
+        pv = inv.parse_workbook(make_xlsx([GOOD_ROW, dup]), "t.xlsx")
+        res = inv.commit_import(pv)
+        assert res.inserted == 1 and res.skipped_duplicates == 1
+        assert db_session.query(Device).count() == 1
+        assert db_session.query(Device).filter_by(display_name="Copy Cat").first() is None
+
+    def test_second_run_skips_all_db_conflicts(self, temp_db, db_session):
+        pv1 = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx")
+        inv.commit_import(pv1)
+        pv2 = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx")
+        res = inv.commit_import(pv2)
+        assert res.inserted == 0 and res.skipped_duplicates == 1
+        assert db_session.query(Device).count() == 1
+
+    def test_rollback_writes_nothing_on_failure(self, temp_db, db_session):
+        rows = [GOOD_ROW,
+                [2, "Second", "Site B", "Switch", "Baik", "cisco", "C2960", "", "", "192.168.10.99"]]
+        pv = inv.parse_workbook(make_xlsx(rows), "t.xlsx")
+        # simulate a DB failure mid-import (e.g. unique violation on second insert)
+        orig_add = None
+        import sqlalchemy.orm as orm
+
+        class Boom(Exception):
+            pass
+
+        target = db_session.__class__.flush
+
+        def failing_flush(self, *a, **k):
+            if self.query(Device).count() >= 1:
+                raise Boom("simulated database conflict")
+            return target(self, *a, **k)
+
+        with patch.object(orm.Session, "flush", failing_flush):
+            with pytest.raises(Boom):
+                inv.commit_import(pv)
+        # full rollback: neither first nor second device persisted
+        assert db_session.query(Device).count() == 0
+        assert db_session.query(Site).count() == 0
+
+    def test_no_credentials_created_by_import(self, temp_db, db_session):
+        pv = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx")
+        inv.commit_import(pv)
+        assert db_session.query(DeviceCredential).count() == 0
+
+
+# ---------------------------------------------------------------- API layer: RBAC + redaction
+
+class TestApiRbac:
+    def test_viewer_cannot_import_preview_or_commit(self, db_engine):
+        client, user = _build_client("viewer", db_engine)
+        files = {"file": ("wb.xlsx", make_xlsx([GOOD_ROW]), "application/octet-stream")}
+        assert client.post("/api/v1/devices/import/preview", files=files).status_code == 403
+        assert client.post("/api/v1/devices/import", files=files).status_code == 403
+        payload = {"hostname": "x", "display_name": "X", "management_ip": "10.0.0.1",
+                   "vendor": "Aruba", "device_type": "Switch", "device_role": "access_switch"}
+        assert client.post("/api/v1/devices/", json=payload).status_code == 403
+        with _make_session(db_engine)() as s:
+            assert s.query(Device).count() == 0
+
+    def test_operator_cannot_delete(self, db_engine):
+        client, user = _build_client("operator", db_engine)
+        maker = _make_session(db_engine)
+        s = maker()
+        d = Device(hostname="op", display_name="Op", management_ip="10.9.9.9",
+                   vendor="Aruba", device_type="Switch", device_role=DeviceRole.ACCESS_SWITCH)
+        s.add(d); s.commit(); did = d.id; s.close()
+        assert client.delete(f"/api/v1/devices/{did}").status_code == 403
+        s = maker(); assert s.query(Device).count() == 1; s.close()
+
+    def test_admin_can_preview_then_commit_and_audit_written(self, db_engine):
+        client, user = _build_client("admin", db_engine)
+        maker = _make_session(db_engine)
+        content = make_xlsx([GOOD_ROW])
+        files = {"file": ("wb.xlsx", content, "application/octet-stream")}
+
+        r = client.post("/api/v1/devices/import/preview", files=files)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "preview"
+        assert body["summary"]["valid"] == 1
+        s = maker(); assert s.query(Device).count() == 0; s.close()   # preview committed nothing
+
+        r = client.post("/api/v1/devices/import", files=files)
+        assert r.status_code == 200
+        assert r.json()["summary"]["inserted"] == 1
+        s = maker()
+        assert s.query(Device).count() == 1
+        audits = s.query(AuditLog).filter_by(action="device_import").all()
+        assert len(audits) == 1 and "inserted=1" in audits[0].details
+        s.close()
+
+    def test_upload_validation_errors(self, db_engine):
+        client, user = _build_client("admin", db_engine)
+        maker = _make_session(db_engine)
+        r = client.post("/api/v1/devices/import/preview",
+                        files={"file": ("notes.txt", b"hello", "text/plain")})
+        assert r.status_code == 400
+        r = client.post("/api/v1/devices/import/preview",
+                        files={"file": ("broken.xlsx", b"not-a-zip", "application/octet-stream")})
+        assert r.status_code == 422
+        detail = r.json()["detail"].lower()
+        for leak in ("traceback", "sqlite", "select", "insert into"):
+            assert leak not in detail
+
+    def test_csv_export_uses_actual_records_and_redacts_secrets(self, db_engine):
+        client, user = _build_client("admin", db_engine)
+        maker = _make_session(db_engine)
+        s = maker()
+        d = Device(hostname="ex", display_name="Export Me", management_ip="10.7.7.7",
+                   vendor="Aruba", device_type="Switch", device_role=DeviceRole.ACCESS_SWITCH,
+                   status=DeviceStatus.UNKNOWN)
+        s.add(d); s.commit()
+        secret = "TopSecretCommunity!"
+        enc = __import__("app.core.encryption", fromlist=["credential_encryption"]).credential_encryption.encrypt(secret)
+        s.add(DeviceCredential(device_id=d.id, snmp_version="v2c",
+                               snmp_community_encrypted=enc, encrypted_password=enc))
+        s.commit(); s.close()
+
+        r = client.get("/api/v1/devices/export.csv")
+        assert r.status_code == 200
+        text = r.text
+        assert "Export Me" in text and "10.7.7.7" in text
+        assert secret not in text and enc not in text
+        lowered = text.lower()
+        for forbidden in ("community", "password"):
+            assert forbidden not in lowered
+
+    def test_update_ip_resets_stale_reachability(self, db_engine):
+        from datetime import datetime
+        client, user = _build_client("admin", db_engine)
+        maker = _make_session(db_engine)
+        s = maker()
+        d = Device(hostname="mv", display_name="Move Me", management_ip="10.1.1.1",
+                   vendor="Aruba", device_type="Switch", device_role=DeviceRole.ACCESS_SWITCH,
+                   status=DeviceStatus.UP, last_seen=datetime.utcnow(), failure_count=0)
+        s.add(d); s.commit(); did = d.id; s.close()
+        r = client.put(f"/api/v1/devices/{did}", json={"management_ip": "10.2.2.2"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "unknown"
+        assert body["last_seen"] is None
