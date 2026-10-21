@@ -291,18 +291,80 @@ class TestFirstPollSemantics:
         d = self._setup(db_session)
         await self._poll(db_session, d.id, FakeAdapter(ok=True))
         iface = db_session.query(DeviceInterface).one()
-        iface.speed_bps = None                                  # speed unknown
+        assert iface.speed_bps == 1_000_000_000   # sanity: discovery stored a speed
+
+        class NoSpeed(FakeAdapter):
+            """Adapter that cannot report interface speed this cycle."""
+            async def get_interfaces(self):
+                return [{'if_index': 1, 'name': 'eth1', 'status': 'up',
+                         'admin_status': 'up', 'description': '', 'alias': ''}]
+            async def get_interface_statistics(self):
+                return [{'if_index': 1, 'name': 'eth1', 'rx_bytes': 2000, 'tx_bytes': 1000,
+                         'rx_errors': 0, 'tx_errors': 0}]
+
+        # Deterministic baseline shift (no sleeps).
+        iface.last_polled = datetime.utcnow() - timedelta(seconds=60)
+        db_session.commit()
+
+        await self._poll(db_session, d.id, NoSpeed())
+        m = db_session.query(InterfaceMetric).order_by(InterfaceMetric.id.desc()).first()
+        # Last-known-good speed retained (adapter reported nothing; we do not
+        # fabricate NULL->0 or wipe the previous measurement), so utilization
+        # remains computable and non-NULL.
+        db_session.expire_all()
+        iface2 = db_session.query(DeviceInterface).one()
+        assert iface2.speed_bps == 1_000_000_000
+        assert m.rx_bps is not None
+        assert m.utilization_in is not None and m.utilization_in <= 100
+
+    async def test_invalid_zero_speed_keeps_last_known_good(self, db_session):
+        """A device reporting speed 0 (invalid/unknown) must not overwrite a
+        previously discovered valid speed nor fabricate utilization."""
+        d = self._setup(db_session)
+        await self._poll(db_session, d.id, FakeAdapter(ok=True))
+        iface = db_session.query(DeviceInterface).one()
+        iface.last_polled = datetime.utcnow() - timedelta(seconds=60)
+        db_session.commit()
+
+        class ZeroSpeed(FakeAdapter):
+            async def get_interfaces(self):
+                return [{'if_index': 1, 'name': 'eth1', 'status': 'up',
+                         'admin_status': 'up', 'speed_bps': 0,
+                         'description': '', 'alias': ''}]
+            async def get_interface_statistics(self):
+                return [{'if_index': 1, 'name': 'eth1', 'rx_bytes': 2000, 'tx_bytes': 1000,
+                         'rx_errors': 0, 'tx_errors': 0}]
+
+        await self._poll(db_session, d.id, ZeroSpeed())
+        db_session.expire_all()
+        iface2 = db_session.query(DeviceInterface).one()
+        assert iface2.speed_bps == 1_000_000_000   # invalid 0 did NOT clobber valid speed
+
+    async def test_never_known_speed_yields_null_utilization_after_persist(self, db_session):
+        """If speed was NEVER known (NULL in DB) but rates are computable,
+        utilization must persist as NULL — proven via fresh DB query, not just
+        the calculator return value."""
+        d = self._setup(db_session)
+        await self._poll(db_session, d.id, FakeAdapter(ok=True))
+        iface = db_session.query(DeviceInterface).one()
+        iface.speed_bps = None                       # simulate unknown speed in DB
         iface.last_polled = datetime.utcnow() - timedelta(seconds=60)
         db_session.commit()
 
         class Up(FakeAdapter):
+            # get_interfaces returns no speed key -> manager must retain NULL
+            async def get_interfaces(self):
+                return [{'if_index': 1, 'name': 'eth1', 'status': 'up',
+                         'admin_status': 'up', 'description': '', 'alias': ''}]
             async def get_interface_statistics(self):
                 return [{'if_index': 1, 'name': 'eth1', 'rx_bytes': 2000, 'tx_bytes': 1000,
                          'rx_errors': 0, 'tx_errors': 0}]
+
         await self._poll(db_session, d.id, Up())
+        db_session.expire_all()                      # force reload from DB rows
         m = db_session.query(InterfaceMetric).order_by(InterfaceMetric.id.desc()).first()
-        assert m.rx_bps is not None                             # rate still computable
-        assert m.utilization_in is None and m.utilization_out is None  # but utilization is NOT
+        assert m.rx_bps is not None                  # rate computable from counters
+        assert m.utilization_in is None and m.utilization_out is None  # NULL survived persistence
 
 
 # ----------------------------------------------------------------------------- status/alerts
