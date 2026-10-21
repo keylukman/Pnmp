@@ -261,14 +261,19 @@ class MonitoringManager:
                 new_status = iface_data.get('status', existing.status)
                 
                 # Update existing interface (metadata only — see docstring).
-                # ``or`` semantics: an adapter that reports no speed (None or
-                # 0) must NOT overwrite a known speed, and must not fabricate
-                # one where the DB holds NULL.
+                # Speed semantics (explicit, per adapter contract):
+                #   - key absent / None  -> measurement unavailable: retain the
+                #     previous speed (last known good; do not fabricate NULL->0).
+                #   - valid positive int -> genuine measurement: update it.
+                #   - present but invalid (<= 0 or non-int) -> unknown; keep the
+                #     previous value rather than storing a meaningless speed.
+                reported_speed = iface_data.get('speed_bps', None)
+                if isinstance(reported_speed, int) and reported_speed > 0:
+                    existing.speed_bps = reported_speed
                 existing.description = iface_data.get('description', existing.description)
                 existing.alias = iface_data.get('alias', existing.alias)
                 existing.status = new_status
                 existing.admin_status = iface_data.get('admin_status', existing.admin_status)
-                existing.speed_bps = iface_data.get('speed_bps') or existing.speed_bps
                 existing.mtu = iface_data.get('mtu', existing.mtu)
                 
                 # Generate events for status changes
@@ -341,36 +346,40 @@ class MonitoringManager:
             # unsupported" (Step 8.3: column defaults removed so NULL survives
             # persistence) — a genuine device-reported zero IS a valid
             # baseline value and must produce positive deltas next poll.
-            have_baseline = (
+            # Per-counter independence: each direction's rate depends only on
+            # that direction's own previous counter (and the shared elapsed
+            # time), never on the other direction's counter being present.
+            prev_rx = iface.rx_bytes
+            prev_tx = iface.tx_bytes
+            have_time = (
                 iface.last_polled is not None
-                and iface.rx_bytes is not None and iface.rx_bytes > 0
-                and iface.tx_bytes is not None and iface.tx_bytes > 0
-                and current_rx_bytes is not None
-                and current_tx_bytes is not None
+                and (now - iface.last_polled).total_seconds() > 0
             )
+            have_rx_baseline = have_time and prev_rx is not None and current_rx_bytes is not None
+            have_tx_baseline = have_time and prev_tx is not None and current_tx_bytes is not None
+            have_baseline = have_rx_baseline or have_tx_baseline
             if have_baseline:
-                # Calculate time delta in seconds
+                # Calculate time delta in seconds (positive — guarded above)
                 time_delta = (now - iface.last_polled).total_seconds()
 
-                if time_delta > 0:
-                    # bps = (current_bytes - previous_bytes) * 8 / elapsed_seconds
-                    rx_delta = current_rx_bytes - iface.rx_bytes
-                    tx_delta = current_tx_bytes - iface.tx_bytes
+                # bps = (current_bytes - previous_bytes) * 8 / elapsed_seconds
+                # Each direction independently; a reset/missing counter in one
+                # direction must not fabricate or suppress the other's rate.
+                if have_rx_baseline:
+                    rx_delta = current_rx_bytes - prev_rx
+                    # Counter reset: never produce negative traffic; mark this
+                    # direction's rate unavailable (None) for this interval.
+                    rx_bps = None if rx_delta < 0 else int((rx_delta * 8) / time_delta)
+                if have_tx_baseline:
+                    tx_delta = current_tx_bytes - prev_tx
+                    tx_bps = None if tx_delta < 0 else int((tx_delta * 8) / time_delta)
 
-                    # Handle counter reset/rollover: never produce negative
-                    # traffic; mark this cycle's rates as unavailable (None).
-                    if rx_delta < 0 or tx_delta < 0:
-                        logger.warning(f"Counter reset detected on {device_id}:{iface.name}")
-                        rx_bps = None
-                        tx_bps = None
-                    else:
-                        rx_bps = int((rx_delta * 8) / time_delta)
-                        tx_bps = int((tx_delta * 8) / time_delta)
-
-                    # Utilization requires known interface speed; when speed
-                    # is unknown it remains NULL — never fabricated.
-                    if iface.speed_bps and iface.speed_bps > 0 and rx_bps is not None and tx_bps is not None:
+                # Utilization requires known interface speed AND a valid rate;
+                # when either is unknown it remains NULL — never fabricated.
+                if iface.speed_bps and iface.speed_bps > 0:
+                    if rx_bps is not None:
                         util_in = min(100, int((rx_bps / iface.speed_bps) * 100))
+                    if tx_bps is not None:
                         util_out = min(100, int((tx_bps / iface.speed_bps) * 100))
 
             # Errors/discards: preserve "unknown" as None instead of fake 0
