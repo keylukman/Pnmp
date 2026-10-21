@@ -260,12 +260,15 @@ class MonitoringManager:
                 old_status = existing.status
                 new_status = iface_data.get('status', existing.status)
                 
-                # Update existing interface (metadata only — see docstring)
+                # Update existing interface (metadata only — see docstring).
+                # ``or`` semantics: an adapter that reports no speed (None or
+                # 0) must NOT overwrite a known speed, and must not fabricate
+                # one where the DB holds NULL.
                 existing.description = iface_data.get('description', existing.description)
                 existing.alias = iface_data.get('alias', existing.alias)
                 existing.status = new_status
                 existing.admin_status = iface_data.get('admin_status', existing.admin_status)
-                existing.speed_bps = iface_data.get('speed_bps', existing.speed_bps)
+                existing.speed_bps = iface_data.get('speed_bps') or existing.speed_bps
                 existing.mtu = iface_data.get('mtu', existing.mtu)
                 
                 # Generate events for status changes

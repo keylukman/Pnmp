@@ -226,17 +226,20 @@ class InterfaceResponse(BaseModel):
     speed: Optional[str] = None
     speed_bps: Optional[int] = None
     duplex: Optional[str] = None
-    rx_bytes: int = 0
-    tx_bytes: int = 0
-    rx_errors: int = 0
-    tx_errors: int = 0
-    rx_discards: int = 0
-    tx_discards: int = 0
-    rx_bps: int = 0
-    tx_bps: int = 0
-    utilization: int = 0
-    utilization_in: int = 0
-    utilization_out: int = 0
+    # Step 8.4: "unavailable" must serialize as null, never a fabricated 0.
+    # Raw counters may legitimately be 0; rates/utilization are NULL until a
+    # valid baseline exists — the schema must not coerce them to zero.
+    rx_bytes: Optional[int] = None
+    tx_bytes: Optional[int] = None
+    rx_errors: Optional[int] = None
+    tx_errors: Optional[int] = None
+    rx_discards: Optional[int] = None
+    tx_discards: Optional[int] = None
+    rx_bps: Optional[int] = None
+    tx_bps: Optional[int] = None
+    utilization: Optional[int] = None
+    utilization_in: Optional[int] = None
+    utilization_out: Optional[int] = None
     last_polled: Optional[datetime] = None
     
     class Config:
@@ -307,12 +310,14 @@ class DeviceMetricResponse(BaseModel):
 
 class InterfaceMetricResponse(BaseModel):
     timestamp: datetime
-    rx_bps: int = 0
-    tx_bps: int = 0
-    rx_errors: int = 0
-    tx_errors: int = 0
-    utilization_in: int = 0
-    utilization_out: int = 0
+    # Step 8.4: NULL means "unavailable" (first poll, counter reset, unknown
+    # speed). The API must surface null — never coerce it to a fabricated 0.
+    rx_bps: Optional[int] = None
+    tx_bps: Optional[int] = None
+    rx_errors: Optional[int] = None
+    tx_errors: Optional[int] = None
+    utilization_in: Optional[int] = None
+    utilization_out: Optional[int] = None
     
     class Config:
         from_attributes = True
