@@ -1,12 +1,13 @@
 """
 PNMP Devices API Routes
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, File, UploadFile, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 import asyncio
 import ipaddress
+import json
 import os
 import re
 import subprocess
@@ -22,6 +23,55 @@ from ...schemas import (
 )
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
+
+# PHASE 3 / MILESTONE 1: inventory mutations (create/update/delete/import) are
+# restricted server-side to Admin/Engineer roles. Read-only users (viewer/operator)
+# keep full read access. This mirrors the existing pattern in users.py and cannot
+# be bypassed by hiding UI controls.
+from ...services import inventory_import as inv
+from ...models import UserRole, AuditLog
+
+_INVENTORY_WRITE_ROLES = (UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.NETWORK_ENGINEER)
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB workbook cap (bounded memory on dev machine)
+
+
+def _require_inventory_writer(user: User) -> None:
+    if user.role not in _INVENTORY_WRITE_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions: device inventory changes require Admin or Network Engineer role",
+        )
+
+
+def _preview_to_dict(pv) -> dict:
+    return {
+        "summary": pv.summary(),
+        "rows": [
+            {
+                "row_no": r.row_no,
+                "src_no": r.src_no,
+                "name": r.name,
+                "location": r.location,
+                "function": r.function,
+                "condition": r.condition,
+                "vendor_raw": r.vendor_raw,
+                "vendor": r.vendor,
+                "model": r.model,
+                "os_version": r.os_version,
+                "eol_eosl": r.eol_eosl,
+                "ip_raw": r.ip_raw,
+                "management_ip": r.management_ip,
+                "device_type": r.device_type,
+                "device_role": r.device_role,
+                "errors": r.errors,
+                "warnings": r.warnings,
+                "duplicate_of_row": r.duplicate_of_row,
+                "db_existing_device_id": r.db_existing_device_id,
+                "status": "invalid" if r.errors else ("skip_duplicate" if (r.duplicate_of_row or r.db_existing_device_id) else "importable"),
+            }
+            for r in pv.rows
+        ],
+    }
 
 
 # PHASE 3 STEP 8 (async API safety): helpers for the connection test.
@@ -153,13 +203,124 @@ async def get_devices(
     return [_device_to_response(d, db) for d in devices]
 
 
+@router.post("/import/preview")
+async def import_preview(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """Preview an Excel inventory import WITHOUT writing anything to the database.
+
+    Validates columns and values, normalizes whitespace, validates management
+    addresses, maps vendor/device role, detects duplicates inside the file and
+    against existing records, and reports per-row errors/warnings. Nothing is
+    committed at this stage (requirement: preview before commit).
+    """
+    _require_inventory_writer(current_user)
+    name = os.path.basename(file.filename or "")
+    if not name.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx workbooks are supported")
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Workbook exceeds the 5 MB upload limit")
+    try:
+        pv = inv.parse_workbook(content, filename=name)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception:
+        # never leak parser internals/paths
+        raise HTTPException(status_code=422, detail="Unable to read workbook (invalid or corrupt xlsx)")
+    return {"success": True, "mode": "preview", **_preview_to_dict(pv)}
+
+
+@router.post("/import")
+async def import_commit(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Transactional bulk import of an Excel workbook into the device inventory.
+
+    The workbook is re-validated server-side (the preview token cannot be used
+    to smuggle unvalidated rows). Either all insertable rows commit or nothing
+    does (full rollback). Duplicate and invalid rows are SKIPPED — never
+    silently deleted or merged. No credentials are imported; devices start with
+    monitoring disabled and status UNKNOWN (registration != reachability).
+    Every attempt is written to the audit log.
+    """
+    _require_inventory_writer(current_user)
+    name = os.path.basename(file.filename or "")
+    if not name.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx workbooks are supported")
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Workbook exceeds the 5 MB upload limit")
+    try:
+        pv = inv.parse_workbook(content, filename=name)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=422, detail="Unable to read workbook (invalid or corrupt xlsx)")
+
+    dry_run = request.query_params.get("dry_run", "").lower() in ("1", "true", "yes")
+    if dry_run:
+        return {"success": True, "mode": "dry_run", **_preview_to_dict(pv)}
+
+    try:
+        result = inv.commit_import(pv)
+    except Exception:
+        db.add(AuditLog(user_id=current_user.id, action="device_import_failed",
+                        resource="devices", resource_id=None,
+                        details=f"Import of '{name}' rolled back entirely (transactional)",
+                        ip_address=request.client.host if request.client else None))
+        db.commit()
+        raise HTTPException(status_code=500, detail="Import failed; the transaction was rolled back and no rows were written")
+
+    db.add(AuditLog(user_id=current_user.id, action="device_import",
+                    resource="devices", resource_id=None,
+                    details=(f"file={name}; inserted={result.inserted}; "
+                             f"skipped_duplicates={result.skipped_duplicates}; invalid={result.invalid}"),
+                    ip_address=request.client.host if request.client else None))
+    db.commit()
+
+    return {
+        "success": True,
+        "mode": "committed",
+        "summary": {**pv.summary(),
+                    "inserted": result.inserted,
+                    "skipped": result.skipped_duplicates,
+                    "created_sites": len(result.created_site_ids)},
+        "message": result.message,
+        "imported_device_ids": result.imported_device_ids,
+    }
+
+
+@router.get("/export.csv")
+async def export_devices_csv(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Export the ACTUAL device inventory as CSV (any authenticated role may read)."""
+    from fastapi.responses import StreamingResponse
+
+    csv_text = inv.devices_to_csv(db)
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"pnmp_device_inventory_{stamp}.csv"
+    return StreamingResponse(
+        iter([csv_text]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.post("/", response_model=DeviceResponse, status_code=status.HTTP_201_CREATED)
 async def create_device(
     device_data: DeviceCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Create a new device"""
+    """Create a new device (Admin/Engineer only — server-side RBAC)"""
+    _require_inventory_writer(current_user)
     # Verify site exists if provided
     if device_data.site_id:
         site = db.query(Site).filter(Site.id == device_data.site_id).first()
@@ -220,18 +381,33 @@ async def update_device(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Update device"""
+    """Update device (Admin/Engineer only — server-side RBAC)"""
+    _require_inventory_writer(current_user)
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Device not found"
         )
-    
+
+    # MILESTONE 1 (data integrity): management_ip is the address monitoring and
+    # connection tests probe. Changing it must NOT carry over reachability
+    # evidence collected for the OLD address — reset observed state so the
+    # device honestly returns to UNKNOWN until re-probed.
+    ip_changed = (
+        device_data.management_ip is not None
+        and device_data.management_ip != device.management_ip
+    )
+
     # Update fields
     update_data = device_data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(device, key, value)
+
+    if ip_changed:
+        device.status = DeviceStatus.UNKNOWN
+        device.failure_count = 0
+        device.last_seen = None
     
     db.commit()
     db.refresh(device)
@@ -245,7 +421,8 @@ async def delete_device(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Delete device"""
+    """Delete device (Admin/Engineer only — server-side RBAC; UI asks confirmation)"""
+    _require_inventory_writer(current_user)
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
         raise HTTPException(
