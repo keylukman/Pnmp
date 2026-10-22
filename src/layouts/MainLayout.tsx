@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/auth';
 import { useDeviceStore } from '../stores/devices';
@@ -18,6 +18,17 @@ export default function MainLayout() {
   const navigate = useNavigate();
 
   const openAlertCount = alerts.filter(a => a.status === 'open').length;
+
+  // Load the REAL alert feed from the backend when live. On failure we do NOT
+  // fall back to fabricated data — the badge simply reflects what actually
+  // exists server-side (and the pages show an explicit DISCONNECTED state).
+  const fetchAlerts = useDeviceStore((st) => st.fetchAlerts);
+  useEffect(() => {
+    if (useDeviceStore.getState().connectionState !== 'demo') {
+      void fetchAlerts();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const toggleSection = (section: string) => {
     setExpandedSections((prev) =>
