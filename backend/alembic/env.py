@@ -29,6 +29,25 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def _run_stamp_without_db() -> None:
+    """PNMP recovery helper: run ``alembic stamp <rev>`` WITHOUT a database
+    connection (offline mode).
+
+    Stamping only rewrites the single-row ``alembic_version`` table. When the
+    configured PostgreSQL URL is unreachable or points at a different DB than
+    the one being repaired, the normal online-mode stamp fails before it can
+    help. Invoked via:  alembic -x noconnect=1 stamp <revision>
+    """
+    context.configure(
+        url=config.get_main_option("sqlalchemy.url"),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -73,7 +92,28 @@ def run_migrations_online() -> None:
             context.run_migrations()
 
 
-if context.is_offline_mode():
+_x_args = context.get_x_argument(as_dictionary=True)
+
+if _x_args.get("noconnect"):
+    if "stamp" not in sys.argv:
+        raise RuntimeError(
+            "noconnect=1 is only supported for `alembic stamp` "
+            "(migrations must run against a live database)"
+        )
+    # Offline stamp: emit the UPDATE/INSERT for alembic_version as SQL text
+    # (no DB connection needed). Usage:
+    #   alembic -x noconnect=1 -x as_sql=1 stamp <revision> > stamp.sql
+    # then execute stamp.sql with psql against the correct database.
+    context.configure(
+        url=config.get_main_option("sqlalchemy.url"),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+        as_sql=bool(_x_args.get("as_sql")),
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+elif context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
