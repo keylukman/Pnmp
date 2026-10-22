@@ -39,6 +39,9 @@ websockets==14.1
 # Utilities
 python-dotenv==1.0.1
 
+# Excel bulk inventory import (Milestone 1)
+openpyxl==3.1.5
+
 # Testing
 pytest==8.3.4
 pytest-asyncio==0.24.0
