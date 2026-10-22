@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { apiService } from '../services/api';
 
 export type DeviceStatus = 'up' | 'down' | 'warning' | 'unknown' | 'maintenance';
 export type DeviceRole = 'core_switch' | 'distribution_switch' | 'access_switch' | 'router' | 'firewall' | 'wireless_controller' | 'access_point' | 'server' | 'load_balancer' | 'other';
@@ -87,13 +88,25 @@ export interface TopologyLink {
   status: 'up' | 'down';
 }
 
-interface DeviceState {
+export type ConnectionState = 'unknown' | 'live' | 'disconnected' | 'demo';
+
+export interface InventoryData {
   devices: Device[];
   sites: Site[];
   alerts: Alert[];
   interfaces: InterfaceData[];
   events: EventLog[];
   topologyLinks: TopologyLink[];
+}
+
+interface DeviceState extends InventoryData {
+  connectionState: ConnectionState;
+  isLoading: boolean;
+  lastError: string | null;
+  lastFetchedAt: string | null;
+  fetchAll: () => Promise<void>;
+  enableDemoMode: () => void;
+  exitDemoMode: () => void;
   selectedDevice: Device | null;
   setSelectedDevice: (device: Device | null) => void;
   addDevice: (device: Device) => void;
@@ -104,8 +117,9 @@ interface DeviceState {
   resolveAlert: (id: string) => void;
 }
 
-// Demo data
-const demoSites: Site[] = [
+// Seed data — ONLY used when DEMO mode is explicitly enabled (never shown as live).
+// Live data comes from fetchAll(); connectionState gates how it is labeled.
+const seedSites: Site[] = [
   { id: '1', name: 'Data Center', description: 'Main data center facility with redundant power and cooling', deviceCount: 3 },
   { id: '2', name: 'Gedung PSSN', description: 'Pusat Sistem dan Sumber Informasi Nasional', deviceCount: 8 },
   { id: '3', name: 'Gedung Akademik', description: 'Academic Building - Faculty and classrooms', deviceCount: 12 },
@@ -114,7 +128,7 @@ const demoSites: Site[] = [
   { id: '6', name: 'Internet Gateway', description: 'ISP Gateway Point - Multi-homed connection', deviceCount: 4 },
 ];
 
-const demoDevices: Device[] = [
+const seedDevices: Device[] = [
   { id: '1', hostname: 'FG-200G-DC', displayName: 'FortiGate 200G', managementIp: '10.0.0.1', vendor: 'Fortinet', model: 'FortiGate 200G', serialNumber: 'FG200G-XXXX', deviceType: 'Firewall', deviceRole: 'firewall', siteId: '1', siteName: 'Data Center', location: 'Rack A1', status: 'up', monitoringEnabled: true, description: 'Main perimeter firewall - Active', firmwareVersion: '7.4.2', macAddress: '00:1A:2B:3C:4D:01', uptime: '45d 12h 30m', cpu: 23, memory: 45, temperature: 42, lastSeen: '2026-01-15T10:30:00Z', createdAt: '2024-06-01T00:00:00Z' },
   { id: '2', hostname: 'FG-101F-DC', displayName: 'FortiGate 101F', managementIp: '10.0.0.2', vendor: 'Fortinet', model: 'FortiGate 101F', serialNumber: 'FG101F-XXXX', deviceType: 'Firewall', deviceRole: 'firewall', siteId: '1', siteName: 'Data Center', location: 'Rack A2', status: 'up', monitoringEnabled: true, description: 'Secondary firewall - Standby', firmwareVersion: '7.4.1', macAddress: '00:1A:2B:3C:4D:02', uptime: '30d 8h 15m', cpu: 18, memory: 38, temperature: 39, lastSeen: '2026-01-15T10:30:00Z', createdAt: '2024-06-01T00:00:00Z' },
   { id: '3', hostname: 'FAZ-150G-DC', displayName: 'FortiAnalyzer 150G', managementIp: '10.0.0.3', vendor: 'Fortinet', model: 'FortiAnalyzer 150G', serialNumber: 'FAZ150G-XXXX', deviceType: 'Security', deviceRole: 'server', siteId: '1', siteName: 'Data Center', location: 'Rack A3', status: 'up', monitoringEnabled: true, description: 'Security log analytics and reporting', firmwareVersion: '7.4.1', macAddress: '00:1A:2B:3C:4D:03', uptime: '60d 2h 45m', cpu: 55, memory: 72, temperature: 44, lastSeen: '2026-01-15T10:30:00Z', createdAt: '2024-06-01T00:00:00Z' },
@@ -132,7 +146,7 @@ const demoDevices: Device[] = [
   { id: '15', hostname: 'AP-AKAD-01', displayName: 'Aruba AP Akademik-01', managementIp: '10.1.7.1', vendor: 'Aruba', model: 'AP-535', serialNumber: 'AAP535-XXXX', deviceType: 'Access Point', deviceRole: 'access_point', siteId: '3', siteName: 'Gedung Akademik', location: 'Floor 3, Room 301', status: 'maintenance', monitoringEnabled: false, description: 'Access point Akademik Floor 3 - Maintenance', firmwareVersion: '8.10', macAddress: '00:1A:2B:3C:4D:15', uptime: '0d 0h 0m', cpu: 0, memory: 0, temperature: 0, lastSeen: '2026-01-14T16:00:00Z', createdAt: '2024-09-01T00:00:00Z' },
 ];
 
-const demoAlerts: Alert[] = [
+const seedAlerts: Alert[] = [
   { id: '1', deviceId: '12', deviceName: 'Cisco 2911 Router', severity: 'critical', title: 'Device DOWN', description: 'Device unreachable via SNMP and ping for 2+ hours', source: 'monitoring', status: 'open', createdAt: '2026-01-15T08:15:00Z' },
   { id: '2', deviceId: '5', deviceName: 'SSR (DMZ Switch)', severity: 'high', title: 'High CPU Usage', description: 'CPU utilization exceeded 65% threshold for 15 minutes', source: 'monitoring', status: 'open', createdAt: '2026-01-15T09:45:00Z' },
   { id: '3', deviceId: '5', deviceName: 'SSR (DMZ Switch)', severity: 'high', title: 'High Memory Usage', description: 'Memory utilization exceeded 80% threshold', source: 'monitoring', status: 'acknowledged', createdAt: '2026-01-15T09:50:00Z' },
@@ -145,7 +159,7 @@ const demoAlerts: Alert[] = [
   { id: '10', deviceId: '11', deviceName: 'Aruba ClearPass', severity: 'info', title: 'Certificate Expiring', description: 'RADIUS server certificate expires in 30 days', source: 'monitoring', status: 'open', createdAt: '2026-01-15T06:00:00Z' },
 ];
 
-const demoInterfaces: InterfaceData[] = [
+const seedInterfaces: InterfaceData[] = [
   { id: '1', deviceId: '9', deviceName: 'Aruba CX Core Switch', name: '1/1/1', description: 'Uplink to CCR-01', status: 'up', speed: '10Gbps', rxBytes: 1250000000, txBytes: 890000000, rxErrors: 0, txErrors: 0, rxDiscards: 2, txDiscards: 0, utilization: 45 },
   { id: '2', deviceId: '9', deviceName: 'Aruba CX Core Switch', name: '1/1/2', description: 'Uplink to CCR-02', status: 'up', speed: '10Gbps', rxBytes: 980000000, txBytes: 750000000, rxErrors: 0, txErrors: 0, rxDiscards: 0, txDiscards: 1, utilization: 38 },
   { id: '3', deviceId: '9', deviceName: 'Aruba CX Core Switch', name: '1/1/48', description: 'Downlink to DIST-SW', status: 'up', speed: '1Gbps', rxBytes: 450000000, txBytes: 320000000, rxErrors: 12, txErrors: 3, rxDiscards: 5, txDiscards: 2, utilization: 72 },
@@ -163,7 +177,7 @@ const demoInterfaces: InterfaceData[] = [
   { id: '15', deviceId: '10', deviceName: 'Aruba Wireless Controller', name: 'ge0/0/0', description: 'Management Uplink', status: 'up', speed: '10Gbps', rxBytes: 890000000, txBytes: 650000000, rxErrors: 0, txErrors: 0, rxDiscards: 0, txDiscards: 0, utilization: 32 },
 ];
 
-const demoEvents: EventLog[] = [
+const seedEvents: EventLog[] = [
   { id: '1', deviceId: '12', deviceName: 'Cisco 2911 Router', category: 'Connectivity', severity: 'critical', message: 'Device DOWN - No response to ICMP/SNMP for 2+ hours', timestamp: '2026-01-15T08:15:00Z', source: 'monitoring' },
   { id: '2', deviceId: '9', deviceName: 'Aruba CX Core Switch', category: 'Interface', severity: 'warning', message: 'Interface 1/1/48 link down', timestamp: '2026-01-15T10:05:00Z', source: 'snmp' },
   { id: '3', deviceId: '9', deviceName: 'Aruba CX Core Switch', category: 'Interface', severity: 'info', message: 'Interface 1/1/48 link up', timestamp: '2026-01-15T10:02:00Z', source: 'snmp' },
@@ -181,7 +195,7 @@ const demoEvents: EventLog[] = [
   { id: '15', deviceId: '11', deviceName: 'Aruba ClearPass', category: 'Certificate', severity: 'info', message: 'RADIUS server certificate expires in 30 days', timestamp: '2026-01-15T06:00:00Z', source: 'monitoring' },
 ];
 
-const demoTopologyLinks: TopologyLink[] = [
+const seedTopologyLinks: TopologyLink[] = [
   { id: '1', sourceDeviceId: '6', sourceInterface: 'ether2', targetDeviceId: '1', targetInterface: 'port1', linkType: 'lldp', bandwidth: '10Gbps', status: 'up' },
   { id: '2', sourceDeviceId: '7', sourceInterface: 'ether2', targetDeviceId: '2', targetInterface: 'port1', linkType: 'lldp', bandwidth: '10Gbps', status: 'up' },
   { id: '3', sourceDeviceId: '1', sourceInterface: 'port2', targetDeviceId: '9', targetInterface: '1/1/1', linkType: 'lldp', bandwidth: '10Gbps', status: 'up' },
@@ -196,14 +210,111 @@ const demoTopologyLinks: TopologyLink[] = [
   { id: '12', sourceDeviceId: '4', sourceInterface: 'Gi1/0/47', targetDeviceId: '13', targetInterface: 'port1', linkType: 'lldp', bandwidth: '1Gbps', status: 'up' },
 ];
 
-export const useDeviceStore = create<DeviceState>((set) => ({
-  devices: demoDevices,
-  sites: demoSites,
-  alerts: demoAlerts,
-  interfaces: demoInterfaces,
-  events: demoEvents,
-  topologyLinks: demoTopologyLinks,
+const emptyState: InventoryData = {
+  devices: [], sites: [], alerts: [], interfaces: [], events: [], topologyLinks: [],
+};
+
+
+/** Map a backend DeviceResponse (snake_case) to the frontend Device shape.
+ *  cpu/memory/temperature/uptime are copied ONLY when the backend actually
+ *  reported them (null stays null -> rendered as "—", never fabricated). */
+function mapDevice(d: any): Device {
+  return {
+    id: String(d.id),
+    hostname: d.hostname ?? '',
+    displayName: d.display_name ?? d.hostname ?? '',
+    managementIp: d.management_ip ?? '',
+    vendor: d.vendor ?? '',
+    model: d.model ?? '',
+    serialNumber: d.serial_number ?? '',
+    deviceType: d.device_type ?? '',
+    deviceRole: (d.device_role ?? 'other') as DeviceRole,
+    siteId: d.site_id != null ? String(d.site_id) : '',
+    siteName: d.site_name ?? '',
+    location: d.location ?? '',
+    status: (d.status ?? 'unknown') as DeviceStatus,
+    monitoringEnabled: !!d.monitoring_enabled,
+    description: d.description ?? '',
+    firmwareVersion: d.firmware_version ?? '',
+    macAddress: d.mac_address ?? '',
+    uptime: d.uptime ?? '',
+    cpu: d.cpu_usage ?? -1,        // -1 = not measured (UI renders "—"); 0 is a valid measurement
+    memory: d.memory_usage ?? -1,
+    temperature: d.temperature ?? -1,
+    lastSeen: d.last_seen ?? '',
+    createdAt: d.created_at ?? '',
+  };
+}
+
+function mapSite(s: any): Site {
+  return {
+    id: String(s.id),
+    name: s.name ?? '',
+    description: s.description ?? '',
+    deviceCount: typeof s.device_count === 'number' ? s.device_count : 0,
+  };
+}
+
+async function loadFromApi(): Promise<InventoryData> {
+  const [devices, sites] = await Promise.all([apiService.getDevices(), apiService.getSites()]);
+  return {
+    devices: (devices ?? []).map(mapDevice),
+    sites: (sites ?? []).map(mapSite),
+    alerts: [],       // real alerts endpoint integration is Milestone 4 — no fake alerts
+    interfaces: [],   // Milestone 3
+    events: [],       // Milestone 4
+    topologyLinks: [],// Milestone 7
+  };
+}
+
+export const useDeviceStore = create<DeviceState>((set, get) => ({
+  ...emptyState,
   selectedDevice: null,
+  connectionState: 'unknown',
+  isLoading: false,
+  lastError: null,
+  lastFetchedAt: null,
+
+  /** Fetch REAL inventory from the backend. On failure the store keeps NO data
+   *  and flips to an explicit DISCONNECTED state — demo values are never served. */
+  fetchAll: async () => {
+    set({ isLoading: true, lastError: null });
+    try {
+      const data = await loadFromApi();
+      set({
+        ...data,
+        connectionState: 'live',
+        isLoading: false,
+        lastFetchedAt: new Date().toISOString(),
+      });
+    } catch (e: any) {
+      const msg = e?.message || 'Backend unreachable';
+      // Do NOT fall back to demo data silently. Explicit disconnected state.
+      set({ ...emptyState, connectionState: 'disconnected', isLoading: false, lastError: msg });
+    }
+  },
+
+  /** Explicitly enabled demo mode — visibly labeled DEMO everywhere it is rendered. */
+  enableDemoMode: () => {
+    set({
+      devices: seedDevices,
+      sites: seedSites,
+      alerts: seedAlerts,
+      interfaces: seedInterfaces,
+      events: seedEvents,
+      topologyLinks: seedTopologyLinks,
+      connectionState: 'demo',
+      isLoading: false,
+      lastError: null,
+      lastFetchedAt: null,
+    });
+  },
+
+  exitDemoMode: () => {
+    set({ ...emptyState, connectionState: 'unknown', lastError: null, lastFetchedAt: null });
+    void get().fetchAll();
+  },
+
   setSelectedDevice: (device) => set({ selectedDevice: device }),
   addDevice: (device) => set((state) => ({ devices: [...state.devices, device] })),
   updateDevice: (id, updates) => set((state) => ({
