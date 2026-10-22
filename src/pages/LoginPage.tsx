@@ -21,8 +21,10 @@ export default function LoginPage() {
       const success = await login(username, password);
       if (success) {
         navigate('/');
+      } else if (!useAuthStore.getState().apiAvailable) {
+        setError('Cannot reach the PNMP backend (http://127.0.0.1:8000). Start it with scripts\\start-backend.ps1 and retry.');
       } else {
-        setError('Invalid credentials. Please try again.');
+        setError('Invalid username or password.');
       }
     } catch {
       setError('Login failed. Please try again.');

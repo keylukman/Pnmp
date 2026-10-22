@@ -3,7 +3,14 @@
  * Centralized API client for backend communication
  */
 
-const API_BASE_URL = 'http://127.0.0.1:8000/api/v1';
+// Same-origin by default: when PNMP is served as static files from the
+// FastAPI backend (production), '/api/v1' resolves without CORS issues.
+// For split dev servers (Vite :5173 + uvicorn :8000) set VITE_API_BASE_URL
+// in frontend/.env, e.g. http://127.0.0.1:8000/api/v1
+const API_ORIGIN = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? 'http://127.0.0.1:8000';
+export const API_BASE_URL =
+  (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? `${API_ORIGIN}/api/v1`;
+export const HEALTH_URL = `${API_ORIGIN}/health`;
 
 class ApiService {
   private token: string | null = null;
@@ -42,8 +49,16 @@ class ApiService {
     });
 
     if (response.status === 401) {
-      this.setToken(null);
-      window.location.href = '/login';
+      // Only expire the session if a token was actually sent (expired/invalid JWT).
+      // Unauthenticated endpoints (e.g. login with wrong password) also return 401
+      // and must NOT trigger a redirect loop on the login page.
+      if (token) {
+        this.setToken(null);
+        localStorage.removeItem('pnmp_user');
+        if (!window.location.pathname.startsWith('/login')) {
+          window.location.href = '/login';
+        }
+      }
       throw new Error('Unauthorized');
     }
 
@@ -168,8 +183,16 @@ class ApiService {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (response.status === 401) {
-      this.setToken(null);
-      window.location.href = '/login';
+      // Only expire the session if a token was actually sent (expired/invalid JWT).
+      // Unauthenticated endpoints (e.g. login with wrong password) also return 401
+      // and must NOT trigger a redirect loop on the login page.
+      if (token) {
+        this.setToken(null);
+        localStorage.removeItem('pnmp_user');
+        if (!window.location.pathname.startsWith('/login')) {
+          window.location.href = '/login';
+        }
+      }
       throw new Error('Unauthorized');
     }
     if (!response.ok) throw new Error(`Export failed (HTTP ${response.status})`);
@@ -179,7 +202,7 @@ class ApiService {
   /** Liveness probe used to decide LIVE vs DISCONNECTED. Never throws. */
   async healthCheck(): Promise<boolean> {
     try {
-      const res = await fetch('http://127.0.0.1:8000/health', { signal: AbortSignal.timeout(4000) });
+      const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(4000) });
       return res.ok;
     } catch {
       return false;
@@ -187,15 +210,26 @@ class ApiService {
   }
 
   // Alerts
-  async getAlerts() {
-    // TODO: Implement when backend alerts endpoint is ready
-    return [];
+  async getAlerts(params?: { status?: string; severity?: string }) {
+    const query = new URLSearchParams();
+    if (params?.status) query.set('status', params.status);
+    if (params?.severity) query.set('severity', params.severity);
+    const qs = query.toString();
+    return this.request<any[]>(`/alerts/${qs ? '?' + qs : ''}`);
+  }
+
+  async acknowledgeAlert(id: number) {
+    // Backend endpoint takes no body (see alerts.py::acknowledge_alert).
+    return this.request<any>(`/alerts/${id}/acknowledge`, { method: 'POST' });
+  }
+
+  async resolveAlert(id: number) {
+    return this.request<any>(`/alerts/${id}/resolve`, { method: 'POST' });
   }
 
   // Events
-  async getEvents() {
-    // TODO: Implement when backend events endpoint is ready
-    return [];
+  async getEvents(limit = 50) {
+    return this.request<any[]>(`/events/?limit=${limit}`);
   }
 }
 
