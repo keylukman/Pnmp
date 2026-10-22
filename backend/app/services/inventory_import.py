@@ -171,6 +171,8 @@ class NormalizedRow:
     duplicate_of_row: Optional[int] = None       # earlier file row with same IP
     duplicate_name_with_rows: List[int] = field(default_factory=list)
     db_existing_device_id: Optional[int] = None  # DB device with same IP/name
+    site_id: Optional[int] = None                # resolved existing site (preview)
+    site_status: str = "none"                    # matched|new_pending_approval|ambiguous|none
 
     def base_payload(self) -> dict:
         """Field values that would be written to the database (validated only)."""
@@ -200,6 +202,64 @@ class NormalizedRow:
 
 
 @dataclass
+class SiteMappingEntry:
+    """Deterministic workbook Lokasi -> PNMP site mapping (Milestone 1, Task D).
+
+    Existing sites are matched case-insensitively and trimmed. Locations that
+    do not match any existing site are NEVER auto-created silently: they are
+    reported as status="new_pending_approval" so a human can approve them via
+    the commit request's approved_sites list. Ambiguous matches (a workbook
+    name matching more than one existing site after normalization) are
+    reported for manual review instead of guessed.
+    """
+    location: str
+    status: str                       # "matched" | "new_pending_approval" | "ambiguous"
+    site_id: Optional[int] = None
+    site_name: Optional[str] = None
+    candidates: List[str] = field(default_factory=list)
+    row_numbers: List[int] = field(default_factory=list)
+
+
+def build_site_mapping(rows: List[NormalizedRow], db: Session) -> List[SiteMappingEntry]:
+    """Read-only preview of how each distinct Lokasi maps to existing sites."""
+    existing: dict[str, List[Site]] = {}
+    for st in db.query(Site).all():
+        key = (st.name or "").strip().lower()
+        if key:
+            existing.setdefault(key, []).append(st)
+
+    grouped: dict[str, List[NormalizedRow]] = {}
+    order: List[str] = []
+    for r in rows:
+        loc = _norm(r.location)
+        if not loc:
+            continue
+        if loc not in grouped:
+            grouped[loc] = []
+            order.append(loc)
+        grouped[loc].append(r)
+
+    entries: List[SiteMappingEntry] = []
+    for loc in order:
+        grp = grouped[loc]
+        row_nos = sorted(x.row_no for x in grp)
+        key = loc.lower()
+        cands = existing.get(key, [])
+        if len(cands) == 1:
+            entries.append(SiteMappingEntry(location=loc, status="matched",
+                                            site_id=cands[0].id, site_name=cands[0].name,
+                                            row_numbers=row_nos))
+        elif len(cands) > 1:
+            entries.append(SiteMappingEntry(location=loc, status="ambiguous",
+                                            candidates=[c.name for c in cands],
+                                            row_numbers=row_nos))
+        else:
+            entries.append(SiteMappingEntry(location=loc, status="new_pending_approval",
+                                            row_numbers=row_nos))
+    return entries
+
+
+@dataclass
 class ImportPreview:
     filename: str
     sheet: str
@@ -211,6 +271,7 @@ class ImportPreview:
     review_needed_count: int
     truncated: bool
     rows: List[NormalizedRow]
+    site_mapping: List[SiteMappingEntry] = field(default_factory=list)
 
     def summary(self) -> dict:
         return {
@@ -223,6 +284,10 @@ class ImportPreview:
             "existing_in_db": self.existing_in_db_count,
             "review_needed": self.review_needed_count,
             "truncated": self.truncated,
+            "sites_matched": sum(1 for e in self.site_mapping if e.status == "matched"),
+            "sites_new_pending_approval": sum(1 for e in self.site_mapping
+                                              if e.status == "new_pending_approval"),
+            "sites_ambiguous": sum(1 for e in self.site_mapping if e.status == "ambiguous"),
         }
 
 
@@ -235,6 +300,7 @@ class ImportResult:
     created_site_ids: List[int]
     imported_device_ids: List[int]
     message: str
+    skipped_site_review: int = 0
 
 
 # ---------------------------------------------------------------- parsing
@@ -348,6 +414,35 @@ def parse_workbook(content: bytes, filename: str = "",
     _annotate_db_conflicts(raw_rows, db=db)
 
     valid = [r for r in raw_rows if not r.errors]
+    site_mapping: List[SiteMappingEntry] = []
+    if db is not None:
+        site_mapping = build_site_mapping(raw_rows, db)
+        matched = {e.location.lower(): e for e in site_mapping if e.status == "matched"}
+        pending = {e.location.lower() for e in site_mapping
+                   if e.status == "new_pending_approval"}
+        ambiguous = {e.location.lower() for e in site_mapping if e.status == "ambiguous"}
+        for r in raw_rows:
+            key = _norm(r.location).lower()
+            if key in matched:
+                r.site_id = matched[key].site_id
+                r.site_status = "matched"
+            elif key in pending:
+                r.site_id = None
+                r.site_status = "new_pending_approval"
+                r.warnings.append(
+                    f"Lokasi '{r.location}' does not match an existing site — "
+                    "SKIPPED on import unless explicitly approved (no auto-create)"
+                )
+            elif key in ambiguous:
+                r.site_id = None
+                r.site_status = "ambiguous"
+                r.warnings.append(
+                    f"Lokasi '{r.location}' matches multiple sites "
+                    "(candidates: " + ", ".join(
+                        sorted({c for e in site_mapping if e.location.lower() == key
+                                for c in e.candidates}) or ["?"]) +
+                    ") — SKIPPED; resolve manually"
+                )
     return ImportPreview(
         filename=filename or "(uploaded)",
         sheet=sheet_name,
@@ -359,6 +454,7 @@ def parse_workbook(content: bytes, filename: str = "",
         review_needed_count=sum(1 for r in raw_rows if r.warnings),
         truncated=truncated,
         rows=raw_rows,
+        site_mapping=site_mapping,
     )
 
 
@@ -410,7 +506,8 @@ def _annotate_db_conflicts(rows: List[NormalizedRow],
 
 # ---------------------------------------------------------------- commit
 
-def commit_import(preview: ImportPreview, db: Optional[Session] = None) -> ImportResult:
+def commit_import(preview: ImportPreview, db: Optional[Session] = None,
+                  approved_sites: Optional[List[str]] = None) -> ImportResult:
     """Transactional import of the previewed rows.
 
     One SQLAlchemy session/transaction: either ALL insertable rows are written
@@ -418,7 +515,14 @@ def commit_import(preview: ImportPreview, db: Optional[Session] = None) -> Impor
     already-in-DB) and invalid rows are skipped, never deleted or merged.
     Management IPs are re-checked against the database inside this transaction
     so a row that slipped past the preview check can never create a duplicate.
+
+    Site policy (Milestone 1, Task D): locations matching an existing site are
+    linked deterministically. Locations with NO match are NOT auto-created
+    unless explicitly listed in ``approved_sites`` (exact workbook Lokasi
+    strings approved by a human after reviewing the preview). Ambiguous
+    locations are always skipped for manual resolution — we never guess.
     """
+    approved = {_norm(s).lower() for s in (approved_sites or []) if _norm(s)}
     owns_session = db is None
     if owns_session:
         from ..core.database import SessionLocal
@@ -426,6 +530,7 @@ def commit_import(preview: ImportPreview, db: Optional[Session] = None) -> Impor
         db = SessionLocal()
     inserted = 0
     skipped_dupes = 0
+    skipped_site_review = 0
     invalid = sum(1 for r in preview.rows if r.errors)
     review = sum(1 for r in preview.rows if r.warnings)
     created_sites: List[int] = []
@@ -448,8 +553,15 @@ def commit_import(preview: ImportPreview, db: Optional[Session] = None) -> Impor
                 review += 1
 
         site_cache: dict[str, Site] = {}
+        ambiguous_keys: set[str] = set()
         for st in db.query(Site).all():
-            site_cache[st.name.strip().lower()] = st
+            k = st.name.strip().lower()
+            if k in site_cache:
+                # two distinct DB sites share a normalized name — never guess
+                ambiguous_keys.add(k)
+                site_cache[k] = None  # poison: force re-evaluation per row
+            else:
+                site_cache[k] = st
 
         for r in preview.rows:
             if r.errors:
@@ -462,12 +574,28 @@ def commit_import(preview: ImportPreview, db: Optional[Session] = None) -> Impor
             if r.site_name:
                 key = r.site_name.lower()
                 site = site_cache.get(key)
-                if site is None:
+                if site is None and key not in ambiguous_keys:
+                    # Deterministic mapping only: a location that matched no
+                    # existing site at preview time is treated as pending
+                    # approval. It is created ONLY when explicitly approved.
+                    loc_key = _norm(r.location).lower()
+                    if r.site_status == "ambiguous" or key in ambiguous_keys:
+                        skipped_site_review += 1
+                        continue
+                    if r.site_status == "new_pending_approval" or (
+                            r.site_status == "none" and key not in site_cache):
+                        if loc_key not in approved:
+                            skipped_site_review += 1
+                            continue
                     site = Site(name=r.site_name[:100])
                     db.add(site)
                     db.flush()  # obtain site.id inside the same transaction
                     site_cache[key] = site
                     created_sites.append(site.id)
+                elif site is None:
+                    # ambiguous normalized match — manual resolution required
+                    skipped_site_review += 1
+                    continue
 
             payload = r.base_payload()
             device = Device(
@@ -508,9 +636,12 @@ def commit_import(preview: ImportPreview, db: Optional[Session] = None) -> Impor
         review_needed=review,
         created_site_ids=created_sites,
         imported_device_ids=device_ids,
+        skipped_site_review=skipped_site_review,
         message=(
             f"Imported {inserted} device(s); skipped {skipped_dupes} duplicate(s); "
-            f"{invalid} invalid row(s) require correction; {review} row(s) flagged for review."
+            f"{invalid} invalid row(s) require correction; {review} row(s) flagged for review"
+            + (f"; {skipped_site_review} row(s) skipped pending site approval."
+               if skipped_site_review else ".")
         ),
     )
 

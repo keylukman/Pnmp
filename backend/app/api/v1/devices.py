@@ -1,7 +1,7 @@
 """
 PNMP Devices API Routes
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query, File, UploadFile, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Query, File, Form, UploadFile, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
@@ -67,9 +67,22 @@ def _preview_to_dict(pv) -> dict:
                 "warnings": r.warnings,
                 "duplicate_of_row": r.duplicate_of_row,
                 "db_existing_device_id": r.db_existing_device_id,
-                "status": "invalid" if r.errors else ("skip_duplicate" if (r.duplicate_of_row or r.db_existing_device_id) else "importable"),
+                "site_id": r.site_id,
+                "site_status": r.site_status,
+                "status": "invalid" if r.errors else ("skip_duplicate" if (r.duplicate_of_row or r.db_existing_device_id) else ("skip_site_review" if (r.site_status in ("new_pending_approval", "ambiguous") and not r.duplicate_of_row and not r.db_existing_device_id) else "importable")),
             }
             for r in pv.rows
+        ],
+        "site_mapping": [
+            {
+                "location": e.location,
+                "status": e.status,
+                "site_id": e.site_id,
+                "site_name": e.site_name,
+                "candidates": e.candidates,
+                "row_numbers": e.row_numbers,
+            }
+            for e in pv.site_mapping
         ],
     }
 
@@ -237,6 +250,7 @@ async def import_preview(
 async def import_commit(
     request: Request,
     file: UploadFile = File(...),
+    approved_sites: str = Form(""),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -247,7 +261,12 @@ async def import_commit(
     does (full rollback). Duplicate and invalid rows are SKIPPED — never
     silently deleted or merged. No credentials are imported; devices start with
     monitoring disabled and status UNKNOWN (registration != reachability).
-    Every attempt is written to the audit log.
+
+    Site policy: locations that do not match an existing site are skipped
+    UNLESS their exact workbook value appears in ``approved_sites`` (comma-
+    separated list reviewed by the operator in the preview). Ambiguous
+    locations are always skipped for manual resolution. Every attempt is
+    written to the audit log.
     """
     _require_inventory_writer(current_user)
     name = os.path.basename(file.filename or "")
@@ -267,10 +286,12 @@ async def import_commit(
     if dry_run:
         return {"success": True, "mode": "dry_run", **_preview_to_dict(pv)}
 
+    approved = [s.strip() for s in (approved_sites or "").split(",") if s.strip()]
+
     # commit_import opens its OWN session/transaction (full rollback on any
     # failure); it never reuses the request session for writes.
     try:
-        result = inv.commit_import(pv)
+        result = inv.commit_import(pv, approved_sites=approved)
     except Exception:
         db.add(AuditLog(user_id=current_user.id, action="device_import_failed",
                         resource="devices", resource_id=None,
@@ -282,7 +303,9 @@ async def import_commit(
     db.add(AuditLog(user_id=current_user.id, action="device_import",
                     resource="devices", resource_id=None,
                     details=(f"file={name}; inserted={result.inserted}; "
-                             f"skipped_duplicates={result.skipped_duplicates}; invalid={result.invalid}"),
+                             f"skipped_duplicates={result.skipped_duplicates}; invalid={result.invalid}; "
+                             f"skipped_site_review={result.skipped_site_review}; "
+                             f"approved_sites={len(approved)}"),
                     ip_address=request.client.host if request.client else None))
     db.commit()
 
@@ -292,6 +315,7 @@ async def import_commit(
         "summary": {**pv.summary(),
                     "inserted": result.inserted,
                     "skipped": result.skipped_duplicates,
+                    "skipped_site_review": result.skipped_site_review,
                     "created_sites": len(result.created_site_ids)},
         "message": result.message,
         "imported_device_ids": result.imported_device_ids,
