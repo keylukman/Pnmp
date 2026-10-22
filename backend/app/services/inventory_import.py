@@ -109,31 +109,40 @@ def map_device_role(*texts: str) -> str:
     return DeviceRole.OTHER.value
 
 
+# Workbook import policy (Milestone 1): the "IP Address" column must contain a
+# real management ADDRESS. Validation uses Python's ipaddress module only.
+# - empty / missing            -> INVALID: "IP Address is required"
+# - CIDF form "1.2.3.4/24"     -> normalized to the bare address (common Excel
+#                                 habit; the prefix length is NOT stored)
+# - anything else (placeholders such as "ISP", hostnames, ranges, junk) ->
+#   INVALID/unresolved, preserved verbatim in ip_raw for manual review.
+# Hostnames are deliberately rejected at import time because the monitoring
+# engine and connection tests operate on addresses; we never guess or fabricate.
+
+_CIDR_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}|\S*:\S*)/\d{1,3}$")
+
+
 def classify_management_ip(raw: str) -> tuple[Optional[str], Optional[str]]:
     """Validate a management address.
 
-    Returns (ip_or_None, error_or_None). A non-empty value that is neither a
-    valid IPv4/IPv6 address nor a plausible hostname is an UNRESOLVED
-    management address (e.g. the literal "ISP" used in the source workbook);
-    it is reported as invalid so a human can resolve it. We never fabricate.
+    Returns (ip_or_None, error_or_None). Only values accepted by
+    ipaddress.ip_address() (valid IPv4 or IPv6) pass. Placeholders such as
+    the literal "ISP" used in the source workbook are reported as unresolved
+    so a human can supply the real address. We never fabricate.
     """
     v = _norm(raw)
     if not v:
         return None, "IP Address is required"
+    candidate = v
+    m = _CIDR_RE.match(v)
+    if m:  # tolerate "a.b.c.d/nn" notation, keep the bare address only
+        candidate = m.group(1)
     try:
-        return str(ipaddress.ip_address(v)), None
+        return str(ipaddress.ip_address(candidate)), None
     except ValueError:
-        pass
-    # A dotted numeric token that LOOKS like an IPv4 octet sequence but fails
-    # ip_address() (e.g. "192.168.1300.999", "10.0.0") is malformed — reject it
-    # instead of misclassifying it as a hostname.
-    if re.fullmatch(r"(?:\d{1,3}\.){0,3}\d{1,3}", v):
-        return None, f"Malformed IP address '{v}'"
-    if re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]{0,99}", v):
-        return v, None  # hostname-style management address (kept verbatim)
-    return None, (
-        f"Unresolved management address '{v}': not a valid IP address or hostname"
-    )
+        return None, (
+            f"Unresolved management address '{v}': not a valid IP address"
+        )
 
 
 # ---------------------------------------------------------------- structures
@@ -230,8 +239,16 @@ class ImportResult:
 
 # ---------------------------------------------------------------- parsing
 
-def parse_workbook(content: bytes, filename: str = "") -> ImportPreview:
-    """Parse xlsx bytes into a fully validated preview (no DB access yet)."""
+def parse_workbook(content: bytes, filename: str = "",
+                   db: Optional[Session] = None) -> ImportPreview:
+    """Parse xlsx bytes into a fully validated preview.
+
+    The parser NEVER writes to the database; when a request ``db`` session is
+    supplied it is used read-only to flag management IPs that already exist in
+    the inventory (duplicate detection against existing records). Without a
+    session the DB-conflict pass is skipped and rows are flagged again at
+    commit time inside the import transaction, so nothing can be smuggled in.
+    """
     from openpyxl import load_workbook
 
     wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
@@ -301,7 +318,9 @@ def parse_workbook(content: bytes, filename: str = "") -> ImportPreview:
     # ---- duplicates inside the file (same normalized IP)
     by_ip: dict[str, int] = {}
     for r in raw_rows:
-        if not r.management_ip:
+        if not r.management_ip or r.errors:
+            # invalid rows never participate in duplicate counting; rows that
+            # are themselves invalid keep management_ip=None so they are skipped
             continue
         key = r.management_ip.lower()
         if key in by_ip:
@@ -325,8 +344,8 @@ def parse_workbook(content: bytes, filename: str = "") -> ImportPreview:
                         + ") — allowed, flagged for manual review"
                     )
 
-    # ---- conflicts against the database
-    _annotate_db_conflicts(raw_rows)
+    # ---- conflicts against the database (read-only)
+    _annotate_db_conflicts(raw_rows, db=db)
 
     valid = [r for r in raw_rows if not r.errors]
     return ImportPreview(
@@ -359,19 +378,21 @@ def _to_normalized(excel_row: int, src: dict) -> NormalizedRow:
     )
 
 
-def _annotate_db_conflicts(rows: List[NormalizedRow]) -> None:
-    """Flag rows whose IP already exists in the device inventory."""
-    from ..core.database import SessionLocal
-
+def _annotate_db_conflicts(rows: List[NormalizedRow],
+                            db: Optional[Session] = None) -> None:
+    """Flag rows whose IP already exists in the device inventory (READ-ONLY)."""
     ips = sorted({r.management_ip for r in rows if r.management_ip})
     if not ips:
         return
-    db = SessionLocal()
+    owns_session = db is None
+    if owns_session:
+        from ..core.database import SessionLocal
+
+        db = SessionLocal()
     try:
-        placeholders = ips
         existing = (
             db.query(Device.id, Device.management_ip)
-            .filter(Device.management_ip.in_(placeholders))
+            .filter(Device.management_ip.in_(ips))
             .all()
         )
         by_ip = {ip: did for did, ip in existing}
@@ -383,21 +404,26 @@ def _annotate_db_conflicts(rows: List[NormalizedRow]) -> None:
                     "— will be SKIPPED on import (no silent merge)"
                 )
     finally:
-        db.close()
+        if owns_session:
+            db.close()
 
 
 # ---------------------------------------------------------------- commit
 
-def commit_import(preview: ImportPreview) -> ImportResult:
+def commit_import(preview: ImportPreview, db: Optional[Session] = None) -> ImportResult:
     """Transactional import of the previewed rows.
 
     One SQLAlchemy session/transaction: either ALL insertable rows are written
     or nothing is (full rollback on any failure). Duplicates (in-file and
     already-in-DB) and invalid rows are skipped, never deleted or merged.
+    Management IPs are re-checked against the database inside this transaction
+    so a row that slipped past the preview check can never create a duplicate.
     """
-    from ..core.database import SessionLocal
+    owns_session = db is None
+    if owns_session:
+        from ..core.database import SessionLocal
 
-    db = SessionLocal()
+        db = SessionLocal()
     inserted = 0
     skipped_dupes = 0
     invalid = sum(1 for r in preview.rows if r.errors)
@@ -405,6 +431,22 @@ def commit_import(preview: ImportPreview) -> ImportResult:
     created_sites: List[int] = []
     device_ids: List[int] = []
     try:
+        # Re-check DB conflicts inside the transaction (TOCTOU-safe): any row
+        # whose IP appeared in the inventory after the preview is skipped too.
+        fresh_ips = sorted({r.management_ip for r in preview.rows
+                            if r.management_ip and not r.errors})
+        current = set()
+        if fresh_ips:
+            current = {ip for (ip,) in db.query(Device.management_ip)
+                       .filter(Device.management_ip.in_(fresh_ips)).all()}
+        for r in preview.rows:
+            if r.management_ip and r.management_ip in current and not r.db_existing_device_id:
+                r.db_existing_device_id = -1  # marker: appeared after preview
+                r.warnings.append(
+                    "Management IP appeared in inventory after preview — SKIPPED"
+                )
+                review += 1
+
         site_cache: dict[str, Site] = {}
         for st in db.query(Site).all():
             site_cache[st.name.strip().lower()] = st
@@ -456,7 +498,8 @@ def commit_import(preview: ImportPreview) -> ImportResult:
         db.rollback()
         raise
     finally:
-        db.close()
+        if owns_session:
+            db.close()
 
     return ImportResult(
         inserted=inserted,

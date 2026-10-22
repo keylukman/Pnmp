@@ -206,6 +206,7 @@ async def get_devices(
 @router.post("/import/preview")
 async def import_preview(
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Preview an Excel inventory import WITHOUT writing anything to the database.
@@ -223,7 +224,7 @@ async def import_preview(
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Workbook exceeds the 5 MB upload limit")
     try:
-        pv = inv.parse_workbook(content, filename=name)
+        pv = inv.parse_workbook(content, filename=name, db=db)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception:
@@ -256,7 +257,7 @@ async def import_commit(
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Workbook exceeds the 5 MB upload limit")
     try:
-        pv = inv.parse_workbook(content, filename=name)
+        pv = inv.parse_workbook(content, filename=name, db=db)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception:
@@ -266,6 +267,8 @@ async def import_commit(
     if dry_run:
         return {"success": True, "mode": "dry_run", **_preview_to_dict(pv)}
 
+    # commit_import opens its OWN session/transaction (full rollback on any
+    # failure); it never reuses the request session for writes.
     try:
         result = inv.commit_import(pv)
     except Exception:

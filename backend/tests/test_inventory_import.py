@@ -157,7 +157,24 @@ class TestValidation:
         r = list(GOOD_ROW); r[9] = "192.168.1300.999"
         pv = inv.parse_workbook(make_xlsx([r]), "t.xlsx")
         assert pv.invalid_count == 1
-        assert "not a valid IP address or hostname" in pv.rows[0].errors[0]
+        assert "not a valid IP address" in pv.rows[0].errors[0]
+
+    def test_hostname_not_accepted_at_import(self, temp_db):
+        """Workbook policy: management addresses must be real IPs; hostnames
+        are unresolved values (the monitoring engine addresses devices by IP)."""
+        r = list(GOOD_ROW); r[9] = "sw-core-01.local"
+        pv = inv.parse_workbook(make_xlsx([r]), "t.xlsx")
+        assert pv.invalid_count == 1
+        assert "Unresolved management address" in pv.rows[0].errors[0]
+        assert r[9] == pv.rows[0].ip_raw  # source value preserved for review
+
+    def test_ipv4_cidr_normalized_and_ipv6_accepted(self, temp_db):
+        r = list(GOOD_ROW); r[9] = "192.168.10.5/24"
+        r2 = list(GOOD_ROW); r2[0] = 2; r2[1] = "v6 GW"; r2[9] = "fe80::1"
+        pv = inv.parse_workbook(make_xlsx([r, r2]), "t.xlsx")
+        assert pv.invalid_count == 0
+        assert pv.rows[0].management_ip == "192.168.10.5"   # prefix not stored
+        assert pv.rows[1].management_ip == "fe80::1"
 
     def test_isp_placeholder_flagged_not_fabricated(self, temp_db):
         """The two 'Cloud Core Router' rows whose IP value is 'ISP' must be
@@ -175,12 +192,24 @@ class TestValidation:
             assert r.ip_raw == "ISP" and r.name == "Cloud Core Router"
 
     def test_duplicate_ip_in_file_flagged(self, temp_db):
+        # GOOD_ROW and r2 share the same IP (192.168.10.1) -> r2 is a duplicate;
+        # dup shares it as well -> THREE rows with one address, TWO duplicates.
         r2 = list(GOOD_ROW); r2[0] = 2; r2[1] = "Switch Core 2"
-        dup = list(GOOD_ROW); dup[0] = 3; dup[1] = "Switch Dup"  # same IP
+        dup = list(GOOD_ROW); dup[0] = 3; dup[1] = "Switch Dup"
         pv = inv.parse_workbook(make_xlsx([GOOD_ROW, r2, dup]), "t.xlsx")
-        assert pv.duplicate_in_file_count == 1
+        assert pv.duplicate_in_file_count == 2
+        assert row_of(pv, 0).duplicate_of_row is None            # first wins
+        assert row_of(pv, 1).duplicate_of_row == pv.rows[0].row_no
         assert row_of(pv, 2).duplicate_of_row == pv.rows[0].row_no
         assert any("Duplicate IP in file" in w for w in row_of(pv, 2).warnings)
+
+    def test_unique_ips_not_flagged_as_duplicates(self, temp_db):
+        a = list(GOOD_ROW); a[0] = 1; a[9] = "10.0.0.1"
+        b = list(GOOD_ROW); b[0] = 2; b[1] = "SW B"; b[9] = "10.0.0.2"
+        c = list(GOOD_ROW); c[0] = 3; c[1] = "SW C"; c[9] = "10.0.0.3"
+        pv = inv.parse_workbook(make_xlsx([a, b, c]), "t.xlsx")
+        assert pv.duplicate_in_file_count == 0
+        assert all(r.duplicate_of_row is None for r in pv.rows)
 
     def test_repeated_names_allowed_but_reviewed(self, temp_db):
         a = list(GOOD_ROW); a[0] = 1; a[1] = "Access Point"; a[9] = "10.0.0.1"
@@ -204,7 +233,7 @@ class TestValidation:
 
     def test_missing_column_rejected(self, temp_db):
         cols = [c for c in COLS if c != "IP Address"]
-        rows = [[c[:9] for c in GOOD_ROW[:9]]]
+        rows = [[str(c) for c in GOOD_ROW[:9]]]
         with pytest.raises(ValueError) as e:
             inv.parse_workbook(make_xlsx(rows, cols), "t.xlsx")
         assert "IP Address" in str(e.value)
@@ -270,16 +299,17 @@ class TestTransactionalImport:
                 [2, "Second", "Site B", "Switch", "Baik", "cisco", "C2960", "", "", "192.168.10.99"]]
         pv = inv.parse_workbook(make_xlsx(rows), "t.xlsx")
         # simulate a DB failure mid-import (e.g. unique violation on second insert)
-        orig_add = None
         import sqlalchemy.orm as orm
 
         class Boom(Exception):
             pass
 
-        target = db_session.__class__.flush
+        state = {"flushes": 0}
+        target = orm.Session.flush
 
         def failing_flush(self, *a, **k):
-            if self.query(Device).count() >= 1:
+            state["flushes"] += 1
+            if state["flushes"] >= 2:
                 raise Boom("simulated database conflict")
             return target(self, *a, **k)
 
