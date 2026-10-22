@@ -290,6 +290,18 @@ class TestValidation:
         assert vendors == ["Aruba", "MikroTik", "Fortinet", "Cisco", "Peplink"]
 
 
+
+
+def _locations_from_rows(rows):
+    """Distinct Lokasi values in a test workbook (approval list for commits)."""
+    seen, out = set(), []
+    for r in rows:
+        loc = str(r[2]).strip()
+        if loc and loc not in seen:
+            seen.add(loc)
+            out.append(loc)
+    return out
+
 # ---------------------------------------------------------------- integration: commit & rollback
 
 class TestTransactionalImport:
@@ -297,8 +309,10 @@ class TestTransactionalImport:
         rows = [GOOD_ROW,
                 [2, "Edge SW", "Gedung Akademik", "Access Switch", "Baik",
                  "aruba", "CX 6100", "", "", "192.168.10.2"]]
-        pv = inv.parse_workbook(make_xlsx(rows), "t.xlsx")
-        res = inv.commit_import(pv)
+        pv = inv.parse_workbook(make_xlsx(rows), "t.xlsx", db=db_session)
+        # Milestone 1 site policy: new locations import only when explicitly
+        # approved by the operator (what the old auto-create did silently).
+        res = inv.commit_import(pv, approved_sites=_locations_from_rows(rows))
         assert res.inserted == 2
         d = db_session.query(Device).filter_by(display_name="Switch Core 1").one()
         # registration is NOT proof of reachability / monitoring:
@@ -315,24 +329,24 @@ class TestTransactionalImport:
 
     def test_duplicates_skipped_never_merged(self, temp_db, db_session):
         dup = list(GOOD_ROW); dup[0] = 9; dup[1] = "Copy Cat"   # same IP as GOOD_ROW
-        pv = inv.parse_workbook(make_xlsx([GOOD_ROW, dup]), "t.xlsx")
-        res = inv.commit_import(pv)
+        pv = inv.parse_workbook(make_xlsx([GOOD_ROW, dup]), "t.xlsx", db=db_session)
+        res = inv.commit_import(pv, approved_sites=_locations_from_rows([GOOD_ROW, dup]))
         assert res.inserted == 1 and res.skipped_duplicates == 1
         assert db_session.query(Device).count() == 1
         assert db_session.query(Device).filter_by(display_name="Copy Cat").first() is None
 
     def test_second_run_skips_all_db_conflicts(self, temp_db, db_session):
-        pv1 = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx")
-        inv.commit_import(pv1)
-        pv2 = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx")
-        res = inv.commit_import(pv2)
+        pv1 = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx", db=db_session)
+        inv.commit_import(pv1, approved_sites=_locations_from_rows([GOOD_ROW]))
+        pv2 = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx", db=db_session)
+        res = inv.commit_import(pv2, approved_sites=_locations_from_rows([GOOD_ROW]))
         assert res.inserted == 0 and res.skipped_duplicates == 1
         assert db_session.query(Device).count() == 1
 
     def test_rollback_writes_nothing_on_failure(self, temp_db, db_session):
         rows = [GOOD_ROW,
                 [2, "Second", "Site B", "Switch", "Baik", "cisco", "C2960", "", "", "192.168.10.99"]]
-        pv = inv.parse_workbook(make_xlsx(rows), "t.xlsx")
+        pv = inv.parse_workbook(make_xlsx(rows), "t.xlsx", db=db_session)
         # simulate a DB failure mid-import (e.g. unique violation on second insert)
         import sqlalchemy.orm as orm
 
@@ -350,14 +364,14 @@ class TestTransactionalImport:
 
         with patch.object(orm.Session, "flush", failing_flush):
             with pytest.raises(Boom):
-                inv.commit_import(pv)
+                inv.commit_import(pv, approved_sites=_locations_from_rows(rows))
         # full rollback: neither first nor second device persisted
         assert db_session.query(Device).count() == 0
         assert db_session.query(Site).count() == 0
 
     def test_no_credentials_created_by_import(self, temp_db, db_session):
-        pv = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx")
-        inv.commit_import(pv)
+        pv = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx", db=db_session)
+        inv.commit_import(pv, approved_sites=_locations_from_rows([GOOD_ROW]))
         assert db_session.query(DeviceCredential).count() == 0
 
 
@@ -398,7 +412,8 @@ class TestApiRbac:
         assert body["summary"]["valid"] == 1
         s = maker(); assert s.query(Device).count() == 0; s.close()   # preview committed nothing
 
-        r = client.post("/api/v1/devices/import", files=files)
+        r = client.post("/api/v1/devices/import", files=files,
+                        data={"approved_sites": "Gedung PSSN"})
         assert r.status_code == 200
         assert r.json()["summary"]["inserted"] == 1
         s = maker()
@@ -471,7 +486,8 @@ class TestHarnessIsolation:
             r = client.post("/api/v1/devices/import/preview", files=files)
             assert r.status_code == 200
             # commit path uses the patched module-level SessionLocal
-            r = client.post("/api/v1/devices/import", files=files)
+            r = client.post("/api/v1/devices/import", files=files,
+                        data={"approved_sites": "Gedung PSSN"})
             assert r.status_code == 200
 
         # Everything landed in the temp DB...
@@ -484,6 +500,74 @@ class TestHarnessIsolation:
         # OperationalError (no PG server in the test environment) if any code
         # path had tried to use it.
         assert database_module.engine.pool.checkedout() == 0
+
+
+class TestSiteMappingPolicy:
+    """Milestone 1 Task D: deterministic Lokasi -> site mapping, no auto-create."""
+
+    def test_preview_reports_site_mapping_without_writing(self, db_engine):
+        maker = _make_session(db_engine)
+        s = maker()
+        s.add(Site(name="Gedung PSSN"))
+        s.add(Site(name="Kantor A"))
+        s.add(Site(name="Kantor B"))
+        s.commit()
+        rows = [
+            GOOD_ROW,  # Lokasi "Gedung PSSN" -> matched existing site
+            [2, "Ambiguity SW", "Kantor", "Switch", "Baik", "cisco", "C2960", "", "", "10.9.1.1"],
+        ]
+        before_devices = s.query(Device).count()
+        pv = inv.parse_workbook(make_xlsx(rows), "map.xlsx", db=s)
+        by_loc = {e.location: e for e in pv.site_mapping}
+        assert by_loc["Gedung PSSN"].status == "matched"
+        assert by_loc["Gedung PSSN"].site_id is not None
+        assert by_loc["Kantor"].status == "new_pending_approval"
+        assert by_loc["Kantor"].row_numbers == [3]  # source row preserved
+        # preview NEVER writes devices or sites
+        assert s.query(Device).count() == before_devices
+        assert s.query(Site).count() == 3
+        s.close()
+
+    def test_unapproved_new_location_is_skipped_not_created(self, temp_db, db_session):
+        rows = [GOOD_ROW,
+                [2, "New Site SW", "Gedung Baru", "Switch", "Baik", "cisco",
+                 "C2960", "", "", "192.168.99.1"]]
+        pv = inv.parse_workbook(make_xlsx(rows), "t.xlsx", db=db_session)
+        res = inv.commit_import(pv, approved_sites=["Gedung Baru"])  # only new one approved
+        names = {d.display_name for d in db_session.query(Device).all()}
+        # "Gedung PSSN" did NOT match an existing site and was NOT approved:
+        assert "Switch Core 1" not in names
+        assert "New Site SW" in names
+        assert res.inserted == 1 and res.skipped_site_review == 1
+        assert db_session.query(Site).filter_by(name="Gedung PSSN").first() is None
+        assert db_session.query(Site).filter_by(name="Gedung Baru").first() is not None
+
+    def test_matched_existing_site_needs_no_approval(self, temp_db, db_session):
+        s = db_session
+        st = Site(name="Gedung PSSN")
+        s.add(st); s.commit()
+        pv = inv.parse_workbook(make_xlsx([GOOD_ROW]), "t.xlsx", db=s)
+        res = inv.commit_import(pv)  # no approvals needed for matched locations
+        assert res.inserted == 1
+        dev = s.query(Device).one()
+        assert dev.site_id == st.id
+        # exactly one site still — no duplicate created
+        assert s.query(Site).count() == 1
+
+    def test_ambiguous_location_never_guesses(self, temp_db, db_session):
+        s = db_session
+        # two distinct sites whose normalized names collide case-insensitively
+        s.add_all([Site(name="kantor pusat"), Site(name="Kantor Pusat ")])
+        s.commit()
+        pv = inv.parse_workbook(
+            make_xlsx([[2, "Amb SW", "Kantor Pusat", "Switch", "Baik", "cisco",
+                        "C2960", "", "", "10.9.9.9"]]), "t.xlsx", db=s)
+        entry = next(e for e in pv.site_mapping if e.location == "Kantor Pusat")
+        assert entry.status == "ambiguous"
+        res = inv.commit_import(pv, approved_sites=["Kantor Pusat"])
+        # approval cannot resolve ambiguity — row stays skipped for manual review
+        assert res.inserted == 0 and res.skipped_site_review == 1
+        assert s.query(Device).count() == 0
 
 
 class TestApiRbac2:
