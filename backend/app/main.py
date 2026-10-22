@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 import uvicorn
 import logging
 import os
+from pathlib import Path
+from fastapi.responses import JSONResponse
 
 from .core.config import settings
 from .core.database import engine, Base, SessionLocal
@@ -122,6 +124,70 @@ async def health_check():
         "monitoring_worker": monitoring_status,
         "version": settings.APP_VERSION
     }
+
+
+# ---------------------------------------------------------------------------
+# Static frontend serving (single-origin deployment on Windows).
+# If a production build exists (repo_root/dist), the backend serves it so the
+# user opens ONE URL (http://127.0.0.1:8000) and there are no CORS issues at
+# all. Mounted AFTER API routes so /api/v1, /health, /docs keep priority.
+# SPA fallback: unknown non-API paths return index.html so deep links like
+# /devices survive a browser refresh.
+# ---------------------------------------------------------------------------
+def _mount_frontend(app: FastAPI) -> None:
+    from fastapi.staticfiles import StaticFiles
+    from starlette.responses import FileResponse
+
+    candidates = [
+        Path(__file__).resolve().parent.parent.parent / "dist",  # repo_root/dist
+        Path.cwd() / "dist",
+    ]
+    dist_dir = next((d for d in candidates if (d / "index.html").is_file()), None)
+    if dist_dir is None:
+        logger.info("No frontend build found in dist/ — API-only mode (run `npm run build`)")
+        return
+
+    assets_dir = dist_dir / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    dist_root = dist_dir.resolve()
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        # Never shadow real API/ws/docs paths; serve file if it exists, else SPA shell.
+        if full_path.startswith(("api", "ws", "docs", "openapi.json", "health")):
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        # Path-traversal guard: reject any parent-directory segment, then verify
+        # the resolved target is strictly inside the build directory.
+        if ".." in full_path.split("/"):
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        file_path = (dist_dir / full_path).resolve()
+        if (
+            full_path
+            and file_path.is_file()
+            and file_path != dist_root
+            and str(file_path).startswith(str(dist_root) + os.sep)
+        ):
+            return FileResponse(str(file_path))
+        return FileResponse(str(dist_dir / "index.html"))
+
+    # Override the JSON root banner with the SPA shell so a single origin
+    # (http://127.0.0.1:8000) opens the dashboard directly.
+    from starlette.routing import Route
+
+    async def spa_root(request):
+        return FileResponse(str(dist_dir / "index.html"))
+
+    for i, rt in enumerate(app.router.routes):
+        if isinstance(rt, Route) and rt.path == "/" and "GET" in getattr(rt, "methods", set()):
+            app.router.routes[i] = Route("/", endpoint=spa_root, methods=["GET"])
+            break
+
+    logger.info(f"Serving frontend build from {dist_dir}")
+
+
+_mount_frontend(app)
 
 
 if __name__ == "__main__":

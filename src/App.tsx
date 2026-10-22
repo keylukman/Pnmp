@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/auth';
+import { getToken } from './services/session';
 import MainLayout from './layouts/MainLayout';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
@@ -22,7 +24,37 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-function App() {
+export default function App() {
+  // If no token is persisted we can boot immediately (login page); otherwise
+  // wait for restoreSession() to validate the token against the backend.
+  const [booted, setBooted] = useState(() => {
+    const hasToken = !!getToken();
+    if (!hasToken) useAuthStore.setState({ user: null, isAuthenticated: false });
+    return !hasToken;
+  });
+  const restoreSession = useAuthStore((st) => st.restoreSession);
+
+  // Validate any persisted token against the backend before rendering routes.
+  // While booting we render a neutral splash so ProtectedRoute never bounces
+  // a still-valid session to /login on refresh.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await restoreSession();
+      if (!cancelled) setBooted(true);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!booted) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-noc-bg text-noc-text">
+        <div className="text-sm text-noc-text-dim animate-pulse">Restoring session…</div>
+      </div>
+    );
+  }
+
   return (
     <BrowserRouter>
       <Routes>
@@ -53,4 +85,3 @@ function App() {
   );
 }
 
-export default App;

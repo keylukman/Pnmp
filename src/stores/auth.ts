@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { apiService } from '../services/api';
+import { getToken, getStoredUser, setStoredUser, clearSession } from '../services/session';
 
 export interface User {
   id: string;
@@ -16,94 +17,100 @@ interface AuthState {
   apiAvailable: boolean;
   login: (username: string, password: string) => Promise<boolean>;
   logout: () => void;
+  restoreSession: () => Promise<void>;
   checkApiHealth: () => Promise<boolean>;
 }
 
+/**
+ * Session persistence strategy:
+ * - The JWT is stored in localStorage by apiService.setToken().
+ * - The user profile is mirrored to localStorage ONLY so a page refresh can
+ *   immediately re-render the app instead of bouncing to /login.
+ * - On every app load we call restoreSession(): it re-validates the token
+ *   against GET /users/me. If the backend rejects it (expired/invalid), the
+ *   session is cleared and the user lands on the login page. Client-side
+ *   state is NEVER an authorization source — the API enforces RBAC per request.
+ */
 export const useAuthStore = create<AuthState>((set) => ({
-  user: null,
-  isAuthenticated: !!localStorage.getItem('pnmp_token'),
+  // Hydrate synchronously from persisted session so ProtectedRoute does not
+  // redirect to /login during the first render after a refresh.
+  user: getStoredUser<User>(),
+  isAuthenticated: !!getToken(),
   isLoading: false,
   apiAvailable: false,
-  
+
   login: async (username: string, password: string) => {
     set({ isLoading: true });
-    
+
     try {
-      // Try API login first
+      // Real API login only. There is intentionally NO demo-mode fallback
+      // here: fabricated sessions were the reason refreshes lost state and
+      // fake data looked live.
       const response = await apiService.login(username, password);
       apiService.setToken(response.access_token);
-      
-      // Get user info
-      try {
-        const userInfo = await apiService.getCurrentUser();
-        set({
-          user: {
-            id: userInfo.id.toString(),
-            username: userInfo.username,
-            fullName: userInfo.full_name,
-            role: userInfo.role,
-            email: userInfo.email,
-          },
-          isAuthenticated: true,
-          isLoading: false,
-          apiAvailable: true,
-        });
-      } catch {
-        // Fallback if /me endpoint fails
-        set({
-          user: {
-            id: '1',
-            username,
-            fullName: username === 'admin' ? 'Super Administrator' : 'User',
-            role: username === 'admin' ? 'super_admin' : 'network_engineer',
-            email: `${username}@pssn.ac.id`,
-          },
-          isAuthenticated: true,
-          isLoading: false,
-          apiAvailable: true,
-        });
-      }
-      
+
+      const userInfo = await apiService.getCurrentUser();
+      const user: User = {
+        id: userInfo.id.toString(),
+        username: userInfo.username,
+        fullName: userInfo.full_name ?? userInfo.username,
+        role: userInfo.role,
+        email: userInfo.email ?? '',
+      };
+      setStoredUser(user);
+      set({ user, isAuthenticated: true, isLoading: false, apiAvailable: true });
       return true;
     } catch (error) {
-      // API not available, use demo mode
-      console.warn('Backend API not available, using demo mode');
-      
-      if (username && password) {
-        set({
-          user: {
-            id: '1',
-            username,
-            fullName: username === 'admin' ? 'Super Administrator' : 'Network Engineer',
-            role: username === 'admin' ? 'super_admin' : 'network_engineer',
-            email: `${username}@pssn.ac.id`,
-          },
-          isAuthenticated: true,
-          isLoading: false,
-          apiAvailable: false,
-        });
-        return true;
+      apiService.setToken(null);
+      setStoredUser(null);
+      const msg = error instanceof Error ? error.message : '';
+      if (msg === 'Unauthorized') {
+        // Backend reachable but credentials rejected — stay on login, show error.
+        set({ isLoading: false, apiAvailable: true });
+      } else {
+        // Network failure / backend down: explicit DISCONNECTED state.
+        set({ isLoading: false, apiAvailable: false });
       }
-      
-      set({ isLoading: false });
       return false;
     }
   },
-  
+
   logout: () => {
     apiService.setToken(null);
+    clearSession();
     set({ user: null, isAuthenticated: false });
   },
-  
-  checkApiHealth: async () => {
-    try {
-      const response = await fetch('http://127.0.0.1:8000/health');
-      const isHealthy = response.ok;
-      set({ apiAvailable: isHealthy });
-      return isHealthy;
-    } catch {
-      set({ apiAvailable: false });
-      return false;
+
+  /** Called once at app start. Validates any persisted token against the API. */
+  restoreSession: async () => {
+    const token = getToken();
+    if (!token) {
+      set({ user: null, isAuthenticated: false, apiAvailable: false });
+      return;
     }
+    try {
+      const userInfo = await apiService.getCurrentUser();
+      const user: User = {
+        id: userInfo.id.toString(),
+        username: userInfo.username,
+        fullName: userInfo.full_name ?? userInfo.username,
+        role: userInfo.role,
+        email: userInfo.email ?? '',
+      };
+      setStoredUser(user);
+      set({ user, isAuthenticated: true, apiAvailable: true });
+    } catch {
+      // Token expired or backend unreachable → clear so UI shows login with
+      // an honest DISCONNECTED hint rather than a half-restored fake session.
+      clearSession();
+      const healthy = await apiService.healthCheck();
+      set({ user: null, isAuthenticated: false, apiAvailable: healthy });
+    }
+  },
+
+  checkApiHealth: async () => {
+    const isHealthy = await apiService.healthCheck();
+    set({ apiAvailable: isHealthy });
+    return isHealthy;
   },
 }));
