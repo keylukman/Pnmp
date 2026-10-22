@@ -1,11 +1,39 @@
-import { useState, useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import ImportWizard from '../components/ImportWizard';
+import apiService from '../services/api';
 import { useNavigate } from 'react-router-dom';
 import { useDeviceStore, Device, DeviceStatus, DeviceRole } from '../stores/devices';
-import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Eye, CheckCircle, XCircle, AlertTriangle, Clock, RefreshCw } from 'lucide-react';
+import { useAuthStore } from '../stores/auth';
+import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Eye, CheckCircle, XCircle, AlertTriangle, Clock, RefreshCw, Upload, Download, WifiOff, FlaskConical, Play } from 'lucide-react';
 
 export default function DevicesPage() {
   const navigate = useNavigate();
-  const { devices, sites, deleteDevice, updateDevice } = useDeviceStore();
+  const { devices, sites, deleteDevice, updateDevice, connectionState, isLoading, lastError, lastFetchedAt, fetchAll, enableDemoMode, exitDemoMode } = useDeviceStore();
+  const user = useAuthStore((st) => st.user);
+  const canWrite = !!user && ['super_admin', 'admin', 'network_engineer'].includes(user.role);
+  const [showImport, setShowImport] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const fileDropRef = useRef<HTMLDivElement>(null);
+
+  // Load REAL data from the backend on mount (and after commits).
+  useEffect(() => { void fetchAll(); }, [fetchAll]);
+
+  const handleExportCsv = async () => {
+    setExporting(true); setExportMsg(null);
+    try {
+      const blob = await apiService.exportDevicesCsv();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `pnmp_device_inventory_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      setExportMsg('CSV exported from live database records.');
+    } catch (e: any) {
+      setExportMsg(`Export failed: ${e?.message || 'unknown error'}`);
+    } finally { setExporting(false); }
+  };
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [siteFilter, setSiteFilter] = useState<string>('all');
@@ -52,11 +80,52 @@ export default function DevicesPage() {
           <h1 className="text-xl font-bold text-noc-text">Devices</h1>
           <p className="text-sm text-noc-text-muted">{filteredDevices.length} of {devices.length} devices</p>
         </div>
-        <button onClick={() => setShowAddModal(true)} className="flex items-center gap-2 px-3 py-2 bg-noc-primary hover:bg-noc-primary/90 text-white text-sm font-medium rounded-lg transition-colors">
-          <Plus className="w-4 h-4" />
-          Add Device
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={handleExportCsv} disabled={exporting || connectionState === 'demo'} title="Download actual inventory as CSV" className="flex items-center gap-2 px-3 py-2 border border-noc-border text-noc-text-muted hover:text-noc-text text-sm rounded-lg transition-colors">
+            <Download className="w-4 h-4" /> {exporting ? 'Exporting…' : 'Export CSV'}
+          </button>
+          {canWrite && (
+            <button onClick={() => setShowImport(true)} disabled={connectionState !== 'live'} title={connectionState === 'live' ? 'Bulk import from Excel' : 'Backend required for import'} className="flex items-center gap-2 px-3 py-2 border border-noc-primary/50 text-noc-primary hover:bg-noc-primary/10 text-sm rounded-lg transition-colors disabled:opacity-40">
+              <Upload className="w-4 h-4" /> Import Excel
+            </button>
+          )}
+          <button onClick={() => setShowAddModal(true)} disabled={!canWrite || connectionState !== 'live'} className="flex items-center gap-2 px-3 py-2 bg-noc-primary hover:bg-noc-primary/90 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50" title={canWrite ? 'Register a new device' : 'Administrator / Network Engineer role required'}>
+            <Plus className="w-4 h-4" />
+            Add Device
+          </button>
+        </div>
       </div>
+
+      {/* Connection state banner — never let demo values masquerade as live data */}
+      {connectionState === 'disconnected' && (
+        <div ref={fileDropRef} className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-lg bg-noc-danger/10 border border-noc-danger/30">
+          <div className="flex items-start gap-2 text-sm text-noc-danger">
+            <WifiOff className="w-4 h-4 mt-0.5 shrink-0" />
+            <div>
+              <p className="font-semibold">DISCONNECTED — backend API unreachable</p>
+              <p className="text-xs text-noc-text-muted">{lastError || 'No data is shown because no fabricated values are displayed as live metrics.'}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => void fetchAll()} className="px-3 py-1.5 text-xs text-white bg-noc-primary rounded-lg flex items-center gap-1"><RefreshCw className="w-3 h-3" /> Retry</button>
+            <button onClick={enableDemoMode} className="px-3 py-1.5 text-xs border border-noc-warning/50 text-noc-warning rounded-lg flex items-center gap-1"><Play className="w-3 h-3" /> Enable DEMO mode</button>
+          </div>
+        </div>
+      )}
+      {connectionState === 'demo' && (
+        <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-lg bg-noc-warning/15 border border-noc-warning/40">
+          <div className="flex items-center gap-2 text-sm text-noc-warning font-semibold uppercase tracking-wide">
+            <FlaskConical className="w-4 h-4" /> DEMO MODE — sample data only. NOT live production metrics.
+          </div>
+          <button onClick={exitDemoMode} className="px-3 py-1.5 text-xs text-white bg-noc-primary rounded-lg">Exit demo &amp; connect</button>
+        </div>
+      )}
+      {connectionState === 'live' && (
+        <div className="flex items-center justify-between text-[11px] text-noc-text-muted px-1">
+          <span className="flex items-center gap-1"><CheckCircle className="w-3 h-3 text-noc-success" /> LIVE data from backend{lastFetchedAt ? ` · last fetched ${new Date(lastFetchedAt).toLocaleTimeString()}` : ''}</span>
+          {exportMsg && <span>{exportMsg}</span>}
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3 bg-noc-surface border border-noc-border rounded-lg p-3">
@@ -143,12 +212,12 @@ export default function DevicesPage() {
                   <td className="text-xs text-noc-text-muted">{device.siteName}</td>
                   <td>
                     <span className={`text-xs ${device.cpu > 70 ? 'text-noc-danger' : device.cpu > 50 ? 'text-noc-warning' : 'text-noc-text-muted'}`}>
-                      {device.status === 'up' ? `${device.cpu}%` : '-'}
+                      {device.cpu >= 0 ? `${device.cpu}%` : '—'}
                     </span>
                   </td>
                   <td>
                     <span className={`text-xs ${device.memory > 80 ? 'text-noc-danger' : device.memory > 60 ? 'text-noc-warning' : 'text-noc-text-muted'}`}>
-                      {device.status === 'up' ? `${device.memory}%` : '-'}
+                      {device.memory >= 0 ? `${device.memory}%` : '—'}
                     </span>
                   </td>
                   <td className="text-xs text-noc-text-muted">{device.uptime}</td>
@@ -173,12 +242,33 @@ export default function DevicesPage() {
             </tbody>
           </table>
         </div>
-        {filteredDevices.length === 0 && (
+        {isLoading && filteredDevices.length === 0 && (
+          <div className="p-8 text-center">
+            <RefreshCw className="w-6 h-6 mx-auto mb-2 text-noc-primary animate-spin" />
+            <p className="text-sm text-noc-text-muted">Loading inventory from backend…</p>
+          </div>
+        )}
+        {!isLoading && connectionState === 'disconnected' && (
+          <div className="p-8 text-center">
+            <WifiOff className="w-6 h-6 mx-auto mb-2 text-noc-danger" />
+            <p className="text-sm text-noc-text-muted">No data available while disconnected. Check that the backend is running (scripts\start-backend.ps1) and press Retry above.</p>
+          </div>
+        )}
+        {!isLoading && connectionState === 'live' && devices.length === 0 && (
+          <div className="p-8 text-center">
+            <p className="text-sm text-noc-text-muted">Inventory is empty. Use “Import Excel” to bulk-register devices or “Add Device” to create one.</p>
+          </div>
+        )}
+        {!isLoading && devices.length > 0 && filteredDevices.length === 0 && (
           <div className="p-8 text-center">
             <p className="text-sm text-noc-text-muted">No devices found matching your filters.</p>
           </div>
         )}
       </div>
+
+      {showImport && (
+        <ImportWizard onClose={() => setShowImport(false)} onCommitted={() => void fetchAll()} />
+      )}
 
       {/* Add/Edit Device Modal */}
       {(showAddModal || editingDevice) && (
