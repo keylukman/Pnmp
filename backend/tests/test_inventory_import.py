@@ -77,10 +77,14 @@ def db_session(db_engine):
 
 @pytest.fixture()
 def temp_db(db_engine):
-    """Route the service's/API's own SessionLocal() calls to the test database.
+    """Route every SessionLocal() call in the process to the temporary test DB.
 
-    Also overrides the FastAPI get_db dependency so TestClient request handlers
-    use the same engine (TestClient runs the app in a worker thread).
+    inventory_import.commit_import performs `from ..core.database import
+    SessionLocal` at CALL time, so patching the attribute on the
+    app.core.database MODULE (not just its original definition site) correctly
+    rebinds the service's own session creation. The API request session comes
+    from the FastAPI get_db dependency override installed by _build_client —
+    both point at the same file-backed SQLite engine, never PostgreSQL.
     """
     maker = sessionmaker(bind=db_engine)
 
@@ -93,7 +97,21 @@ def _make_session(db_engine):
 
 
 def _build_client(role: str, db_engine):
-    """FastAPI TestClient whose get_current_user resolves the REAL persisted user."""
+    """FastAPI TestClient whose get_current_user resolves the REAL persisted user.
+
+    Two session paths must be routed to the temporary database:
+      1. Request handlers -> via the FastAPI get_db dependency override
+         (the application's established testing pattern).
+      2. inventory_import.commit_import/_annotate_db_conflicts -> these perform
+         `from ..core.database import SessionLocal` at CALL time, so we patch
+         the attribute on the app.core.database MODULE for the entire lifetime
+         of this client. Without this, the commit step would open a real
+         PostgreSQL session (the exact defect behind the previous failure).
+
+    The returned client restores the SessionLocal patch and clears all
+    dependency overrides when closed (pytest fixtures are function-scoped, so
+    no state leaks between tests).
+    """
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from app.api.v1 import devices as devices_api
@@ -108,11 +126,13 @@ def _build_client(role: str, db_engine):
 
     def _current_user():
         db = maker()
-        return db.query(User).get(uid)
+        try:
+            return db.get(User, uid)
+        finally:
+            db.close()
 
     app = FastAPI()
     app.include_router(devices_api.router, prefix="/api/v1")
-    app.dependency_overrides[get_current_user] = _current_user
 
     def _get_db():
         db = maker()
@@ -121,9 +141,24 @@ def _build_client(role: str, db_engine):
         finally:
             db.close()
 
-    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_current_user] = _current_user
     app.dependency_overrides[get_db] = _get_db
-    return TestClient(app), user
+
+    # Patch SessionLocal at the module reference the SERVICE imports from,
+    # active for every request made through this client.
+    patcher = patch("app.core.database.SessionLocal", maker)
+    patcher.start()
+
+    client = TestClient(app)
+    original_close = client.close
+
+    def close():
+        patcher.stop()
+        app.dependency_overrides.clear()
+        original_close()
+
+    client.close = close  # type: ignore[method-assign]
+    return client, user
 
 
 def row_of(preview, idx=0):
@@ -408,6 +443,50 @@ class TestApiRbac:
         for forbidden in ("community", "password"):
             assert forbidden not in lowered
 
+class TestHarnessIsolation:
+    """Regression guard: the inventory tests must NEVER open a connection to the
+    configured PostgreSQL database. app.core.database.engine is bound to
+    settings.DATABASE_URL (PostgreSQL by default); any accidental use of
+    SessionLocal()/get_db without the overrides installed above would try to
+    connect there and fail in this environment. This test proves the harness
+    routes both the service-level sessions AND the API request sessions to the
+    temporary SQLite engine only.
+    """
+
+    def test_no_postgres_connection_from_harness(self, db_engine):
+        from app.core import database as database_module
+
+        # The production engine really is PostgreSQL-bound in default config;
+        # if that ever changes, the guard below still stands on its own.
+        assert str(database_module.engine.url).startswith("postgresql"), \
+            "expected default DATABASE_URL to be PostgreSQL for this guard"
+
+        client, user = _build_client("admin", db_engine)
+        maker = _make_session(db_engine)
+        content = make_xlsx([GOOD_ROW])
+        files = {"file": ("wb.xlsx", content, "application/octet-stream")}
+
+        with patch("app.core.database.SessionLocal", maker):
+            # preview path uses the overridden get_db dependency
+            r = client.post("/api/v1/devices/import/preview", files=files)
+            assert r.status_code == 200
+            # commit path uses the patched module-level SessionLocal
+            r = client.post("/api/v1/devices/import", files=files)
+            assert r.status_code == 200
+
+        # Everything landed in the temp DB...
+        s = maker()
+        assert s.query(Device).count() == 1
+        assert s.query(AuditLog).filter_by(action="device_import").count() == 1
+        s.close()
+        # ...and the real PostgreSQL engine was never connected/touched:
+        # its pool has no checked-out connections and would have raised an
+        # OperationalError (no PG server in the test environment) if any code
+        # path had tried to use it.
+        assert database_module.engine.pool.checkedout() == 0
+
+
+class TestApiRbac2:
     def test_update_ip_resets_stale_reachability(self, db_engine):
         from datetime import datetime
         client, user = _build_client("admin", db_engine)
